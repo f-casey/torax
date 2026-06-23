@@ -210,39 +210,31 @@ def get_updated_electron_density(
   else:
     value = n_e_value
 
-  if profile_conditions_params.use_robin_bc:
-    # Always use the Robin pytree structure (left_face_grad_constraint=array,
-    # left_face_constraint=None) so the JAX carry shape is constant across
-    # every iteration including the very first (initialization) call where
-    # transport_coeffs may not be available yet.
-    if transport_coeffs is not None:
-      D_e_inner = transport_coeffs.d_face_el[0]
-      left_face_grad = (
-          value[0]
-          * profile_conditions_params.n_e_robin_bc_c_s
-          / jnp.maximum(D_e_inner, jnp.ones(()) * 1e-30)
-      )
-    else:
-      # Initialization: transport_coeffs not available; zero-gradient placeholder
-      # keeps the pytree structure identical to the solver-step output.
-      left_face_grad = jnp.zeros(())
-    n_e = cell_variable.CellVariable(
-        value=value,
-        face_centers=geo.rho_face_norm,
-        left_face_grad_constraint=left_face_grad,
-        left_face_constraint=None,
-        right_face_grad_constraint=None,
-        right_face_constraint=n_e_right_bc,
+  if profile_conditions_params.use_robin_bc and transport_coeffs is not None:
+    # Equivalent Dirichlet BC for the sheath Robin condition Γ = n_face * c_s.
+    # Derived from: −D_e*(n[0]−n_face)/(Δρ/2) = n_face*c_s*a_minor
+    # → n_face = n[0]*D_e / (D_e + c_s*a_minor*Δρ/2)
+    # This keeps n_face bounded in [0, n[0]] for all D_e ≥ 0, avoiding the
+    # face-value extrapolation blow-up that occurs with left_face_grad_constraint.
+    D_e_inner = transport_coeffs.d_face_el[0]
+    c_s_val = profile_conditions_params.n_e_robin_bc_c_s
+    dr0 = geo.rho_face_norm[1] - geo.rho_face_norm[0]
+    denominator = D_e_inner + c_s_val * geo.a_minor * dr0 / 2.0
+    n_face_robin = value[0] * D_e_inner / jnp.maximum(
+        denominator, jnp.ones(()) * 1e-30
     )
+    left_face_bc = n_face_robin
   else:
-    n_e = cell_variable.CellVariable(
-        value=value,
-        face_centers=geo.rho_face_norm,
-        left_face_grad_constraint=None,
-        left_face_constraint=n_e_left_bc,
-        right_face_grad_constraint=None,
-        right_face_constraint=n_e_right_bc,
-    )
+    left_face_bc = n_e_left_bc
+
+  n_e = cell_variable.CellVariable(
+      value=value,
+      face_centers=geo.rho_face_norm,
+      left_face_grad_constraint=None,
+      left_face_constraint=left_face_bc,
+      right_face_grad_constraint=None,
+      right_face_constraint=n_e_right_bc,
+  )
   return n_e
 
 
@@ -738,19 +730,11 @@ def get_updated_ions(
       # Not expected to be reached but needed to avoid linter errors.
       raise ValueError('Unknown impurity mode.')
 
-  # When Robin BC is active, left_face_constraint is None; use the innermost
-  # cell-centre value as the face quasi-neutrality approximation.
-  n_e_inner_face = (
-      n_e.left_face_constraint
-      if n_e.left_face_constraint is not None
-      else n_e.value[0]
-  )
-
   n_i = cell_variable.CellVariable(
       value=n_e.value * ion_properties.dilution_factor,
       face_centers=geo.rho_face_norm,
       left_face_grad_constraint=None,
-      left_face_constraint=n_e_inner_face * ion_properties.dilution_factor_inner_edge,
+      left_face_constraint=n_e.left_face_constraint * ion_properties.dilution_factor_inner_edge,
       right_face_grad_constraint=None,
       right_face_constraint=n_e.right_face_constraint
       * ion_properties.dilution_factor_outer_edge,
@@ -765,7 +749,7 @@ def get_updated_ions(
   n_impurity_left_face_constraint = jnp.where(
       ion_properties.dilution_factor_inner_edge == 1.0,
       0.0,
-      (n_e_inner_face - n_i.left_face_constraint * Z_i_face[0])
+      (n_e.left_face_constraint - n_i.left_face_constraint * Z_i_face[0])
       / ion_properties.Z_impurity_face[0],
   )
 
