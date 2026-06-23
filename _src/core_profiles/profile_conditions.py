@@ -72,7 +72,9 @@ class RuntimeParams:
   n_e_left_bc_is_fGW: bool
   n_e_right_bc: array_typing.FloatScalar
   n_e_right_bc_is_fGW: bool
+  n_e_robin_bc_c_s: array_typing.FloatScalar
   current_profile_nu: float
+  use_robin_bc: bool = dataclasses.field(metadata={'static': True})
   initial_j_is_total_current: bool = dataclasses.field(
       metadata={'static': True}
   )
@@ -197,6 +199,8 @@ class ProfileConditions(torax_pydantic.BaseModelFrozen):
   n_e_right_bc: torax_pydantic.TimeVaryingScalar | None = None
   n_e_left_bc_is_fGW: bool = False
   n_e_right_bc_is_fGW: bool = False
+  use_robin_bc: Annotated[bool, torax_pydantic.JAX_STATIC] = False
+  n_e_robin_bc_c_s: torax_pydantic.PositiveTimeVaryingScalar | None = None
   current_profile_nu: float = 1.0
   initial_j_is_total_current: Annotated[bool, torax_pydantic.JAX_STATIC] = False
   # TODO(b/434175938): Remove this before the V2 API release in place of
@@ -409,7 +413,10 @@ class ProfileConditions(torax_pydantic.BaseModelFrozen):
     runtime_params = {
         x.name: getattr(self, x.name)
         for x in dataclasses.fields(RuntimeParams)
-        if x.name not in ['n_e_left_bc_is_absolute', 'n_e_right_bc_is_absolute']
+        if x.name not in [
+            'n_e_left_bc_is_absolute', 'n_e_right_bc_is_absolute',
+            'n_e_robin_bc_c_s',
+        ]
     }
 
     if self.T_e_left_bc is None:
@@ -457,6 +464,12 @@ class ProfileConditions(torax_pydantic.BaseModelFrozen):
       runtime_params['n_e_right_bc_is_absolute'] = False
     else:
       runtime_params['n_e_right_bc_is_absolute'] = True
+
+    runtime_params['n_e_robin_bc_c_s'] = (
+        self.n_e_robin_bc_c_s.get_value(t)
+        if self.n_e_robin_bc_c_s is not None
+        else jnp.zeros(())
+    )
 
     def _get_value(x):
       if isinstance(
