@@ -1,0 +1,465 @@
+# Copyright 2024 DeepMind Technologies Limited
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""A transport model that uses a QLKNN model."""
+import dataclasses
+import enum
+import functools
+import logging
+import os
+from typing import Final
+
+import jax
+from jax import numpy as jnp
+from torax._src import array_typing
+from torax._src import constants
+from torax._src import jax_utils
+from torax._src import state
+from torax._src.config import runtime_params as runtime_params_lib
+from torax._src.geometry import geometry
+from torax._src.pedestal_model import pedestal_model as pedestal_model_lib
+from torax._src.transport_model import base_qlknn_model
+from torax._src.transport_model import qlknn_10d
+from torax._src.transport_model import qlknn_model_wrapper
+from torax._src.transport_model import qualikiz_based_transport_model
+from torax._src.transport_model import runtime_params as transport_runtime_params_lib
+from torax._src.transport_model import transport_model as transport_model_lib
+
+
+# pylint: disable=invalid-name
+class ShearSuppressionModel(enum.StrEnum):
+  """Shear suppression model for rotation effects on transport.
+
+  WALTZ_RULE: Simple model from Waltz et al., PoP 1998
+  (https://doi.org/10.1063/1.872847): f_rot_rule = -alpha.
+  VANDEPLASSCHE2020: Fitted rotation rule from Van de Plassche et al., PoP 2020
+  (https://doi.org/10.1063/1.5134126). It was fitted for purely toroidal
+  transport, so has both stabilizing (ExB shear) and destabilizing (parallel
+  velocity shear) effects, with a geometry dependence setting the relative
+  impact.
+  """
+
+  WALTZ_RULE = 'waltz_rule'
+  VANDEPLASSCHE2020 = 'vandeplassche2020'
+
+
+@jax.tree_util.register_dataclass
+@dataclasses.dataclass(frozen=True)
+class RuntimeParams(qualikiz_based_transport_model.RuntimeParams):
+  """Runtime parameters for QLKNN transport model."""
+  include_ITG: bool
+  include_TEM: bool
+  include_ETG: bool
+  ITG_flux_ratio_correction: float
+  ETG_correction_factor: float
+  clip_inputs: bool
+  clip_margin: float
+  shear_suppression_model: ShearSuppressionModel = dataclasses.field(
+      metadata={'static': True}
+  )
+  shear_suppression_alpha: float
+  output_mode_contributions: bool = dataclasses.field(metadata={'static': True})
+
+
+_EPSILON_NN: Final[float] = (
+    1 / 3
+)  # fixed inverse aspect ratio used to train QLKNN models
+
+
+# Rotation rule constants.
+# Defined in the van de Plassche 2020 paper.(https://arxiv.org/abs/1911.05617)
+_C1: Final[float] = 0.13
+_C2: Final[float] = 0.41
+_C3: Final[float] = 0.09
+_C4: Final[float] = 1.65
+
+
+# Memoize, but evict the old model if a new path is given.
+@functools.lru_cache(maxsize=1)
+def get_model(path: str, name: str) -> base_qlknn_model.BaseQLKNNModel:
+  """Load the model."""
+  try:
+    if path:
+      if not path.endswith('.qlknn'):
+        logging.info('Loading QLKNN10D model from path %s.', path)
+        return qlknn_10d.QLKNN10D(path, name)
+      else:
+        return qlknn_model_wrapper.QLKNNModelWrapper(path, name)
+    elif name == qlknn_10d.QLKNN10D_NAME:
+      raise ValueError(
+          'To use QLKNN10D, please provide a path to the qlknn-hyper directory.'
+      )
+    return qlknn_model_wrapper.QLKNNModelWrapper(path, name)
+  except FileNotFoundError as fnfe:
+    raise FileNotFoundError(
+        f'Failed to load model with path "{path}" and name "{name}". Check that'
+        ' the path exists.'
+    ) from fnfe
+
+
+@jax.tree_util.register_dataclass
+@dataclasses.dataclass(frozen=True)
+class QLKNNRuntimeConfigInputs:
+  """Runtime config inputs for QLKNN.
+
+  The runtime RuntimeParams contains global runtime parameters, not
+  all of which are cacheable. This set of inputs IS cacheable, and using this
+  added layer allows the global config to change without affecting how
+  QLKNNTransportModel works.
+  """
+
+  # pylint: disable=invalid-name
+  transport: RuntimeParams
+  Ped_top: float
+  set_pedestal: bool
+  # pylint: enable=invalid-name
+
+  @staticmethod
+  def from_runtime_params_slice(
+      transport_runtime_params: transport_runtime_params_lib.RuntimeParams,
+      runtime_params: runtime_params_lib.RuntimeParams,
+      pedestal_model_output: pedestal_model_lib.PedestalModelOutput,
+  ) -> 'QLKNNRuntimeConfigInputs':
+    # Required for pytype
+    assert isinstance(transport_runtime_params, RuntimeParams)
+
+    return QLKNNRuntimeConfigInputs(
+        transport=transport_runtime_params,
+        Ped_top=pedestal_model_output.rho_norm_ped_top,
+        set_pedestal=runtime_params.pedestal.set_pedestal,
+    )
+
+
+def _filter_model_output(
+    model_output: base_qlknn_model.ModelOutput,
+    include_ITG: bool,
+    include_TEM: bool,
+    include_ETG: bool,
+) -> base_qlknn_model.ModelOutput:
+  """Potentially filtering out some fluxes."""
+  filter_map = {
+      'qi_itg': include_ITG,
+      'qe_itg': include_ITG,
+      'pfe_itg': include_ITG,
+      'qe_tem': include_TEM,
+      'qi_tem': include_TEM,
+      'pfe_tem': include_TEM,
+      'qe_etg': include_ETG,
+  }
+
+  def filter_flux(flux_name: str, value: jax.Array) -> jax.Array:
+    return jax.lax.cond(
+        filter_map.get(flux_name, True),
+        lambda: value,
+        lambda: jnp.zeros_like(value),
+    )
+
+  return {k: filter_flux(k, v) for k, v in model_output.items()}
+
+
+def clip_inputs(
+    feature_scan: jax.Array,
+    clip_margin: float,
+    inputs_and_ranges: base_qlknn_model.InputsAndRanges,
+) -> jax.Array:
+  """Clip input values according to the training set limits + optional user-defined margin for qlknn."""
+  for i, key in enumerate(inputs_and_ranges.keys()):
+    bounds = inputs_and_ranges[key]
+    # set min or max if present in the bounds dict
+    min_val = bounds.get('min', -jnp.inf)
+    max_val = bounds.get('max', jnp.inf)
+    # increase/decrease bounds based on clip_margin
+    min_val += jnp.where(
+        jnp.isfinite(min_val), jnp.abs(min_val) * (1 - clip_margin), 0.0
+    )
+    max_val -= jnp.where(
+        jnp.isfinite(max_val), jnp.abs(max_val) * (1 - clip_margin), 0.0
+    )
+    feature_scan = feature_scan.at[:, i].set(
+        jnp.clip(
+            feature_scan[:, i],
+            min_val,
+            max_val,
+        )
+    )
+  return feature_scan
+
+
+def _maybe_apply_rotation_rule(
+    model_output: base_qlknn_model.ModelOutput,
+    qualikiz_inputs: qualikiz_based_transport_model.QualikizInputs,
+    rotation_mode: qualikiz_based_transport_model.RotationMode,
+    shear_suppression_model: ShearSuppressionModel,
+    shear_suppression_alpha: float,
+    geo: geometry.Geometry,
+) -> base_qlknn_model.ModelOutput:
+  """Apply the rotation scaling factor to the model output.
+
+  Args:
+    model_output: The raw model output from QLKNN.
+    qualikiz_inputs: Prepared inputs for the quasilinear model.
+    rotation_mode: Controls where the rotation rule is applied.
+    shear_suppression_model: Which shear suppression model to use.
+    shear_suppression_alpha: Alpha parameter for Waltz rule.
+    geo: Geometry of the torus.
+
+  Returns:
+    Model output with rotation scaling applied to ITG and TEM modes.
+  """
+  if rotation_mode == qualikiz_based_transport_model.RotationMode.OFF:
+    # Rotation is disabled. Do not apply the rotation rule.
+    return model_output
+
+  gamma_E_GB = qualikiz_inputs.gamma_E_GB
+  if rotation_mode == qualikiz_based_transport_model.RotationMode.HALF_RADIUS:
+    # Only consider contribution from the outer half-radius.
+    # We use a linear ramp-up between rho 0.4 and 0.6 to avoid a discontinuity.
+    # jnp.interp uses constant extrapolation by default for values outside of
+    # the interpolation range.
+    scaling = jnp.interp(
+        geo.rho_face_norm,
+        jnp.array([0.4, 0.6], dtype=jax_utils.get_dtype()),
+        jnp.array([0.0, 1.0], dtype=jax_utils.get_dtype()),
+    )
+    gamma_E_GB = gamma_E_GB * scaling
+
+  if shear_suppression_model == ShearSuppressionModel.WALTZ_RULE:
+    c1, c2, c3, c4 = 0.0, 0.0, 0.0, shear_suppression_alpha
+  elif shear_suppression_model == ShearSuppressionModel.VANDEPLASSCHE2020:
+    c1, c2, c3, c4 = _C1, _C2, _C3, _C4
+  else:
+    raise ValueError(
+        f'Unknown shear suppression model: {shear_suppression_model}'
+    )
+
+  f_rot_rule = (
+      c1 * qualikiz_inputs.q
+      + c2 * qualikiz_inputs.smag
+      + c3 / (_EPSILON_NN * qualikiz_inputs.x)
+      - c4
+  )
+
+  lower_bound = 1e-4
+  gamma_max = jnp.maximum(model_output['gamma_max'].squeeze(), lower_bound)
+
+  scaling_factor = jnp.clip(
+      1.0 + f_rot_rule * jnp.abs(gamma_E_GB) / gamma_max, 0.0
+  )
+  # Add an extra dimension to match model outputs.
+  scaling_factor = scaling_factor[..., jnp.newaxis]
+
+  # Apply the scaling factor to ITG and TEM modes
+  updated_model_output = dict(model_output)
+  for flux in updated_model_output:
+    if flux.endswith('_itg') or flux.endswith('_tem'):
+      updated_model_output[flux] = scaling_factor * updated_model_output[flux]
+
+      # Make tiny flux values exactly zero.
+      # This effectively clamps gradients in the stability region. This
+      # prevents the solver from "waking up" zero-flux modes with spurious or
+      # unstable gradients.
+      updated_model_output[flux] = jnp.where(
+          jnp.abs(updated_model_output[flux]) < constants.CONSTANTS.eps,
+          0.0,
+          updated_model_output[flux],
+      )
+
+  return updated_model_output
+
+
+@dataclasses.dataclass(frozen=True, eq=False)
+class QLKNNTransportModel(
+    qualikiz_based_transport_model.QualikizBasedTransportModel
+):
+  """Calculates turbulent transport coefficients."""
+  path: str
+  name: str
+
+  def call_implementation(
+      self,
+      transport_runtime_params: RuntimeParams,
+      runtime_params: runtime_params_lib.RuntimeParams,
+      geo: geometry.Geometry,
+      core_profiles: state.CoreProfiles,
+      pedestal_model_output: pedestal_model_lib.PedestalModelOutput,
+  ) -> transport_model_lib.TurbulentTransport:
+    """Calculates several transport coefficients simultaneously.
+
+    Args:
+      transport_runtime_params: Input runtime parameters for this
+        transport model. Can change without triggering a JAX recompilation.
+      runtime_params: Input runtime parameters for all components
+        of the simulation that can change without triggering a JAX
+        recompilation.
+      geo: Geometry of the torus.
+      core_profiles: Core plasma profiles.
+      pedestal_model_output: Output of the pedestal model.
+
+    Returns:
+      coeffs: transport coefficients
+    """
+    # Required for pytype
+    assert isinstance(transport_runtime_params, RuntimeParams)
+
+    runtime_config_inputs = QLKNNRuntimeConfigInputs.from_runtime_params_slice(
+        transport_runtime_params,
+        runtime_params,
+        pedestal_model_output,
+    )
+    return self._combined(
+        runtime_config_inputs,
+        geo,
+        core_profiles,
+        runtime_params.neoclassical.poloidal_velocity_multiplier,
+    )
+
+  def _combined(
+      self,
+      runtime_config_inputs: QLKNNRuntimeConfigInputs,
+      geo: geometry.Geometry,
+      core_profiles: state.CoreProfiles,
+      poloidal_velocity_multiplier: array_typing.FloatScalar,
+  ) -> transport_model_lib.TurbulentTransport:
+    """Actual implementation of `__call__`.
+
+    `__call__` itself is just a cache dispatch wrapper.
+
+    Args:
+      runtime_config_inputs: Input runtime parameters that can change without
+        triggering a JAX recompilation.
+      geo: Geometry of the torus.
+      core_profiles: Core plasma profiles.
+      poloidal_velocity_multiplier: Poloidal velocity multiplier.
+
+    Returns:
+      chi_face_ion: Chi for ion temperature, along faces.
+      chi_face_el: Chi for electron temperature, along faces.
+      d_face_ne: Diffusivity for electron density, along faces.
+      v_face_ne: Convectivity for electron density, along faces.
+    """
+    qualikiz_inputs = self._prepare_qualikiz_inputs(
+        transport=runtime_config_inputs.transport,
+        geo=geo,
+        core_profiles=core_profiles,
+        poloidal_velocity_multiplier=poloidal_velocity_multiplier,
+    )
+    model = get_model(self.path, self.name)
+
+    # To take into account a different aspect ratio compared to the qlknn
+    # training set, the qlknn input normalized radius needs to be rescaled by
+    # the inverse aspect ratio. This ensures that the model is evaluated with
+    # the correct trapped electron fraction.
+    qualikiz_inputs = dataclasses.replace(
+        qualikiz_inputs,
+        x=qualikiz_inputs.x * qualikiz_inputs.epsilon[-1] / _EPSILON_NN,
+    )
+
+    feature_scan = model.get_model_inputs_from_qualikiz_inputs(qualikiz_inputs)
+    # Clip inputs if requested.
+    # TODO(b/364218524): Consider better clipping of out-of-distribution inputs.
+    feature_scan = jax.lax.cond(
+        runtime_config_inputs.transport.clip_inputs,
+        lambda: clip_inputs(
+            feature_scan,
+            runtime_config_inputs.transport.clip_margin,
+            model.inputs_and_ranges,
+        ),  # Called when True
+        lambda: feature_scan,  # Called when False
+    )
+    model_output = model.predict(feature_scan)
+
+    model_output = _maybe_apply_rotation_rule(
+        model_output,
+        qualikiz_inputs,
+        runtime_config_inputs.transport.rotation_mode,
+        runtime_config_inputs.transport.shear_suppression_model,
+        runtime_config_inputs.transport.shear_suppression_alpha,
+        geo,
+    )
+
+    model_output = _filter_model_output(
+        model_output=model_output,
+        include_ITG=runtime_config_inputs.transport.include_ITG,
+        include_TEM=runtime_config_inputs.transport.include_TEM,
+        include_ETG=runtime_config_inputs.transport.include_ETG,
+    )
+
+    # combine fluxes
+    qi_itg = model_output['qi_itg'].squeeze()
+    qi_tem = model_output['qi_tem'].squeeze()
+    qe_itg = (
+        model_output['qe_itg'].squeeze()
+        * runtime_config_inputs.transport.ITG_flux_ratio_correction
+    )
+    qe_tem = model_output['qe_tem'].squeeze()
+    qe_etg = (
+        model_output['qe_etg'].squeeze()
+        * runtime_config_inputs.transport.ETG_correction_factor
+    )
+    pfe_itg = model_output['pfe_itg'].squeeze()
+    pfe_tem = model_output['pfe_tem'].squeeze()
+
+    # Combine fluxes for total transport
+    qi_total = qi_itg + qi_tem
+    qe_total = qe_itg + qe_tem + qe_etg
+    pfe_total = pfe_itg + pfe_tem
+
+    # Create base transport
+    base_transport = self._make_core_transport(
+        qi=qi_total,
+        qe=qe_total,
+        pfe=pfe_total,
+        quasilinear_inputs=qualikiz_inputs,
+        transport=runtime_config_inputs.transport,
+        geo=geo,
+        core_profiles=core_profiles,
+        gradient_reference_length=geo.R_major,
+        gyrobohm_flux_reference_length=geo.a_minor,
+    )
+
+    def add_mode_contributions() -> transport_model_lib.TurbulentTransport:
+      """Decompose transport coefficients into mode contributions."""
+      eps = constants.CONSTANTS.eps
+
+      # Decompose ion heat diffusivity
+      chi_ion_itg = base_transport.chi_face_ion * qi_itg / (qi_total + eps)
+      chi_ion_tem = base_transport.chi_face_ion * qi_tem / (qi_total + eps)
+
+      # Decompose electron heat diffusivity
+      chi_el_itg = base_transport.chi_face_el * qe_itg / (qe_total + eps)
+      chi_el_tem = base_transport.chi_face_el * qe_tem / (qe_total + eps)
+      chi_el_etg = base_transport.chi_face_el * qe_etg / (qe_total + eps)
+
+      # Decompose particle diffusivity
+      d_el_itg = base_transport.d_face_el * pfe_itg / (pfe_total + eps)
+      d_el_tem = base_transport.d_face_el * pfe_tem / (pfe_total + eps)
+      v_el_itg = base_transport.v_face_el * pfe_itg / (pfe_total + eps)
+      v_el_tem = base_transport.v_face_el * pfe_tem / (pfe_total + eps)
+
+      return dataclasses.replace(
+          base_transport,
+          chi_face_ion_itg=chi_ion_itg,
+          chi_face_ion_tem=chi_ion_tem,
+          chi_face_el_itg=chi_el_itg,
+          chi_face_el_tem=chi_el_tem,
+          chi_face_el_etg=chi_el_etg,
+          d_face_el_itg=d_el_itg,
+          d_face_el_tem=d_el_tem,
+          v_face_el_itg=v_el_itg,
+          v_face_el_tem=v_el_tem,
+      )
+
+    if runtime_config_inputs.transport.output_mode_contributions:
+      base_transport = add_mode_contributions()
+    return base_transport

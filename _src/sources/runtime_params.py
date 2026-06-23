@@ -1,0 +1,50 @@
+# Copyright 2024 DeepMind Technologies Limited
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Configuration for all the sources/sinks modelled in Torax."""
+import dataclasses
+import enum
+
+import jax
+from torax._src import array_typing
+from torax._src import interpolated_param
+
+TimeInterpolatedInput = interpolated_param.TimeInterpolatedInput
+
+
+@enum.unique
+class Mode(enum.Enum):
+  """Defines how to compute the source terms for this source/sink."""
+
+  # Source is set to zero always.
+  ZERO = "ZERO"
+
+  # Source values come from a model in code. These terms can be implicit or
+  # explicit depending on the model implementation.
+  MODEL_BASED = "MODEL_BASED"
+
+  # Source values come from a pre-determined set of values, that may evolve in
+  # time. Currently, this is only supported for sources that have a 1D output
+  # along the cell grid or face grid.
+  PRESCRIBED = "PRESCRIBED"
+
+
+@jax.tree_util.register_dataclass
+@dataclasses.dataclass(frozen=True)
+class RuntimeParams:
+  """Runtime params for a single TORAX source."""
+
+  prescribed_values: tuple[array_typing.FloatVector, ...]
+  mode: Mode = dataclasses.field(metadata={"static": True})
+  is_explicit: bool = dataclasses.field(metadata={"static": True})
