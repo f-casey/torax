@@ -210,16 +210,22 @@ def get_updated_electron_density(
   else:
     value = n_e_value
 
-  if (
-      profile_conditions_params.use_robin_bc
-      and transport_coeffs is not None
-  ):
-    D_e_inner = transport_coeffs.d_face_el[0]
-    left_face_grad = (
-        value[0]
-        * profile_conditions_params.n_e_robin_bc_c_s
-        / jnp.maximum(D_e_inner, jnp.ones(()) * 1e-30)
-    )
+  if profile_conditions_params.use_robin_bc:
+    # Always use the Robin pytree structure (left_face_grad_constraint=array,
+    # left_face_constraint=None) so the JAX carry shape is constant across
+    # every iteration including the very first (initialization) call where
+    # transport_coeffs may not be available yet.
+    if transport_coeffs is not None:
+      D_e_inner = transport_coeffs.d_face_el[0]
+      left_face_grad = (
+          value[0]
+          * profile_conditions_params.n_e_robin_bc_c_s
+          / jnp.maximum(D_e_inner, jnp.ones(()) * 1e-30)
+      )
+    else:
+      # Initialization: transport_coeffs not available; zero-gradient placeholder
+      # keeps the pytree structure identical to the solver-step output.
+      left_face_grad = jnp.zeros(())
     n_e = cell_variable.CellVariable(
         value=value,
         face_centers=geo.rho_face_norm,
