@@ -215,14 +215,17 @@ def get_updated_electron_density(
     # where Γ_total includes BOTH the FVM diffusion AND convection (QL pinch) fluxes.
     #
     # Derivation (ghost-cell Dirichlet mode, see diffusion_terms.py / convection_terms.py):
-    #   Diffusion contribution to vpr*dn[0]/dt from the left face:
-    #     2*D_eff*(n_face - n[0]) / dr0²
-    #   Convection contribution from the left face (ghost-cell mode):
-    #     [V*(2α-1)*n[0] + 2*V*(1-α)*n_face] / dr0
-    #   Setting total = -n_face * c_s * |g0_face[0]|  (sheath loss, per unit rho):
-    #     n_face = n[0] * (A + V*(1-2α)/dr0) / (A + 2*V*(1-α)/dr0 + c_s*|g0_face[0]|)
+    #   The FVM flux at the left face (particles/s in the ρ-coordinate) is:
+    #     Γ_left = 2*D_eff*(n_face-n[0])/dr0 + V*(2α-1)*n[0] + 2*V*(1-α)*n_face
+    #   Sheath condition: Γ_left = -n_face * c_s  (NO geometric area factor — the
+    #   QL dipole FVM flux D_eff*dn/dρ already absorbs all geometry via D_eff=D̃*U,
+    #   so c_s enters without an additional g0 or a_minor multiplier).
+    #   Solving for n_face:
+    #     n_face = n[0] * (A + V*(1-2α)/dr0) / (A + 2*V*(1-α)/dr0 + c_s/dr0)
     #   where A = 2*D_eff/dr0², V = g0_face[0]*v_face_el[0] (= full_v_face_el[0]),
     #   α = peclet_to_alpha(-0.5*dr0*V/D_eff).  Reduces to diffusion-only when V=0.
+    #   At steady state this gives n_face = N_EDGE*U[-1]/(U[0]+c_s/D̃), matching
+    #   the QL dipole analytical target.
     D_e_inner = transport_coeffs.d_face_el[0]
     v_e_inner = transport_coeffs.v_face_el[0]
     c_s_val = profile_conditions_params.n_e_robin_bc_c_s
@@ -253,7 +256,7 @@ def get_updated_electron_density(
     )
 
     A = 2.0 * D_eff / (dr0 * dr0)
-    B_sheath = c_s_val * jnp.abs(geo.g0_face[0])
+    B_sheath = c_s_val / dr0
     numerator   = A + V_full * (1.0 - 2.0 * alpha) / dr0
     denominator = A + 2.0 * V_full * (1.0 - alpha) / dr0 + B_sheath
     n_face_robin = value[0] * numerator / jnp.maximum(denominator, jnp.ones(()) * 1e-30)
