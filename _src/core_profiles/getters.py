@@ -212,16 +212,21 @@ def get_updated_electron_density(
 
   if profile_conditions_params.use_robin_bc and transport_coeffs is not None:
     # Equivalent Dirichlet BC for the sheath Robin condition Γ = n_face * c_s.
-    # Derived from: −D_e*(n[0]−n_face)/(Δρ/2) = n_face*c_s*a_minor
-    # → n_face = n[0]*D_e / (D_e + c_s*a_minor*Δρ/2)
-    # This keeps n_face bounded in [0, n[0]] for all D_e ≥ 0, avoiding the
-    # face-value extrapolation blow-up that occurs with left_face_grad_constraint.
+    #
+    # The FVM diffusion loss from the left face (with D_eff = g1_over_vpr_face*D_e):
+    #   2 * D_eff * (n[0] - n_face) / dr0²  [units: m³/s × m⁻³ = s⁻¹]
+    # must balance the physical boundary loss (loss rate per unit rho):
+    #   n_face * c_s * g0_face[0]            [units: m⁻³ × m/s × m² = s⁻¹]
+    #
+    # Solving: n_face = n[0] * D_eff / (D_eff + c_s * g0_face[0] * dr0² / 2)
+    # n_face is always in [0, n[0]], preventing face-value extrapolation blow-up.
     D_e_inner = transport_coeffs.d_face_el[0]
     c_s_val = profile_conditions_params.n_e_robin_bc_c_s
     dr0 = geo.rho_face_norm[1] - geo.rho_face_norm[0]
-    denominator = D_e_inner + c_s_val * geo.a_minor * dr0 / 2.0
-    n_face_robin = value[0] * D_e_inner / jnp.maximum(
-        denominator, jnp.ones(()) * 1e-30
+    D_eff = geo.g1_over_vpr_face[0] * D_e_inner               # m³/s
+    B = c_s_val * jnp.abs(geo.g0_face[0]) * dr0 * dr0 / 2.0  # m³/s  (|g0| for sign convention)
+    n_face_robin = value[0] * D_eff / jnp.maximum(
+        D_eff + B, jnp.ones(()) * 1e-30
     )
     left_face_bc = n_face_robin
   else:
