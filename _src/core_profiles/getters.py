@@ -211,23 +211,54 @@ def get_updated_electron_density(
     value = n_e_value
 
   if profile_conditions_params.use_robin_bc and transport_coeffs is not None:
-    # Equivalent Dirichlet BC for the sheath Robin condition Γ = n_face * c_s.
+    # Equivalent Dirichlet BC for the sheath Robin condition Γ_total = n_face * c_s,
+    # where Γ_total includes BOTH the FVM diffusion AND convection (QL pinch) fluxes.
     #
-    # The FVM diffusion loss from the left face (with D_eff = g1_over_vpr_face*D_e):
-    #   2 * D_eff * (n[0] - n_face) / dr0²  [units: m³/s × m⁻³ = s⁻¹]
-    # must balance the physical boundary loss (loss rate per unit rho):
-    #   n_face * c_s * g0_face[0]            [units: m⁻³ × m/s × m² = s⁻¹]
-    #
-    # Solving: n_face = n[0] * D_eff / (D_eff + c_s * g0_face[0] * dr0² / 2)
-    # n_face is always in [0, n[0]], preventing face-value extrapolation blow-up.
+    # Derivation (ghost-cell Dirichlet mode, see diffusion_terms.py / convection_terms.py):
+    #   Diffusion contribution to vpr*dn[0]/dt from the left face:
+    #     2*D_eff*(n_face - n[0]) / dr0²
+    #   Convection contribution from the left face (ghost-cell mode):
+    #     [V*(2α-1)*n[0] + 2*V*(1-α)*n_face] / dr0
+    #   Setting total = -n_face * c_s * |g0_face[0]|  (sheath loss, per unit rho):
+    #     n_face = n[0] * (A + V*(1-2α)/dr0) / (A + 2*V*(1-α)/dr0 + c_s*|g0_face[0]|)
+    #   where A = 2*D_eff/dr0², V = g0_face[0]*v_face_el[0] (= full_v_face_el[0]),
+    #   α = peclet_to_alpha(-0.5*dr0*V/D_eff).  Reduces to diffusion-only when V=0.
     D_e_inner = transport_coeffs.d_face_el[0]
+    v_e_inner = transport_coeffs.v_face_el[0]
     c_s_val = profile_conditions_params.n_e_robin_bc_c_s
     dr0 = geo.rho_face_norm[1] - geo.rho_face_norm[0]
-    D_eff = geo.g1_over_vpr_face[0] * D_e_inner               # m³/s
-    B = c_s_val * jnp.abs(geo.g0_face[0]) * dr0 * dr0 / 2.0  # m³/s  (|g0| for sign convention)
-    n_face_robin = value[0] * D_eff / jnp.maximum(
-        D_eff + B, jnp.ones(()) * 1e-30
+    D_eff = geo.g1_over_vpr_face[0] * D_e_inner        # m³/s
+    V_full = geo.g0_face[0] * v_e_inner                 # m³/s (full_v_face_el[0])
+
+    # Power-law upwind weight (mirrors peclet_to_alpha in convection_terms.py).
+    safe_D = jnp.maximum(D_eff, jnp.ones(()) * 1e-30)
+    pe = -0.5 * dr0 * V_full / safe_D
+    pe_eps = jnp.array(1e-3)
+    pe_s = jnp.where(jnp.abs(pe) < pe_eps, pe_eps, pe)
+    alpha = jnp.where(
+        jnp.abs(pe) < pe_eps,
+        jnp.array(0.5),
+        jnp.where(
+            pe > 10.0, (pe_s - 1.0) / pe_s,
+            jnp.where(
+                pe > pe_eps,
+                ((pe_s - 1.0) + (1.0 - pe_s / 10.0) ** 5) / pe_s,
+                jnp.where(
+                    pe >= -10.0,
+                    ((1.0 + pe_s / 10.0) ** 5 - 1.0) / pe_s,
+                    -1.0 / pe_s,
+                ),
+            ),
+        ),
     )
+
+    A = 2.0 * D_eff / (dr0 * dr0)
+    B_sheath = c_s_val * jnp.abs(geo.g0_face[0])
+    numerator   = A + V_full * (1.0 - 2.0 * alpha) / dr0
+    denominator = A + 2.0 * V_full * (1.0 - alpha) / dr0 + B_sheath
+    n_face_robin = value[0] * numerator / jnp.maximum(denominator, jnp.ones(()) * 1e-30)
+    # Clip to physical range to guard against transient blow-up when D_eff ≈ 0 at startup.
+    n_face_robin = jnp.clip(n_face_robin, jnp.zeros(()), value[0])
     left_face_bc = n_face_robin
   else:
     left_face_bc = n_e_left_bc
