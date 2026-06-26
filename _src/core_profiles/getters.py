@@ -262,6 +262,22 @@ def get_updated_electron_density(
     n_face_robin = value[0] * numerator / jnp.maximum(denominator, jnp.ones(()) * 1e-30)
     # Clip to physical range to guard against transient blow-up when D_eff ≈ 0 at startup.
     n_face_robin = jnp.clip(n_face_robin, jnp.zeros(()), value[0])
+
+    # Debug: reconstruct Γ_left from the ghost-cell formula and compare to -n_face*c_s.
+    # Γ_left = 2*D_eff*(n_face-n[0])/dr0 + V*(2α-1)*n[0] + 2*V*(1-α)*n_face
+    _gamma_diff = 2.0 * D_eff * (n_face_robin - value[0]) / dr0
+    _gamma_conv = V_full * ((2.0 * alpha - 1.0) * value[0] + 2.0 * (1.0 - alpha) * n_face_robin)
+    _gamma_left = _gamma_diff + _gamma_conv
+    _gamma_target = -n_face_robin * c_s_val
+    jax.debug.print(
+        'RobinBC | n_face={nf:.4e}  n[0]={n0:.4e}  '
+        'D_eff={de:.4e}  V={v:.4e}  alpha={al:.4f}  dr0={dr:.4f} | '
+        'Γ_left={gl:.4e}  -n_face*cs={gt:.4e}  err={er:.2%}',
+        nf=n_face_robin, n0=value[0], de=D_eff, v=V_full, al=alpha, dr=dr0,
+        gl=_gamma_left, gt=_gamma_target,
+        er=jnp.abs(_gamma_left - _gamma_target) / jnp.maximum(jnp.abs(_gamma_target), jnp.ones(()) * 1e-30),
+    )
+
     left_face_bc = n_face_robin
   else:
     left_face_bc = n_e_left_bc
