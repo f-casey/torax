@@ -263,24 +263,54 @@ def get_updated_electron_density(
     # Clip to physical range to guard against transient blow-up when D_eff ≈ 0 at startup.
     n_face_robin = jnp.clip(n_face_robin, jnp.zeros(()), value[0])
 
-    # Debug: reconstruct Γ_left from the ghost-cell formula and compare to -n_face*c_s.
-    # Γ_left = 2*D_eff*(n_face-n[0])/dr0 + V*(2α-1)*n[0] + 2*V*(1-α)*n_face
-    _gamma_diff = 2.0 * D_eff * (n_face_robin - value[0]) / dr0
-    _gamma_conv = V_full * ((2.0 * alpha - 1.0) * value[0] + 2.0 * (1.0 - alpha) * n_face_robin)
-    _gamma_left = _gamma_diff + _gamma_conv
-    _gamma_target = -n_face_robin * c_s_val
-    jax.debug.print(
-        'RobinBC | n_face={nf:.4e}  n[0]={n0:.4e}  '
-        'D_eff={de:.4e}  V={v:.4e}  alpha={al:.4f}  dr0={dr:.4f} | '
-        'Γ_left={gl:.4e}  -n_face*cs={gt:.4e}  err={er:.2%}',
-        nf=n_face_robin, n0=value[0], de=D_eff, v=V_full, al=alpha, dr=dr0,
-        gl=_gamma_left, gt=_gamma_target,
-        er=jnp.abs(_gamma_left - _gamma_target) / jnp.maximum(jnp.abs(_gamma_target), jnp.ones(()) * 1e-30),
-    )
-
     left_face_bc = n_face_robin
   else:
     left_face_bc = n_e_left_bc
+
+  if profile_conditions_params.use_neumann_outer and transport_coeffs is not None:
+    # Zero-total-flux outer BC: Γ_diff + Γ_conv = 0 at ρ=1.
+    # Right-face analog of the Robin inner BC — solve for n_face_outer s.t. no
+    # net particle flux (diffusive + convective) crosses the outer face.
+    #   Γ_right = 2D(n_face-n[-1])/drN + V[(2α-1)n[-1] + 2(1-α)n_face] = 0
+    #   → n_face = n[-1] × (A + V(1-2α)/drN) / (A + 2V(1-α)/drN)
+    # where A = 2D/drN², pe = +0.5·drN·V/D (positive sign for right face:
+    # outward V→Pe>0→interior is upwind). When V·drN/(2D) > 1 the formula gives
+    # n_face < 0 (convection too strong to balance); clips to 0 (absorbing-wall limit).
+    D_e_outer = transport_coeffs.d_face_el[-1]
+    v_e_outer = transport_coeffs.v_face_el[-1]
+    drN = geo.rho_face_norm[-1] - geo.rho_face_norm[-2]
+    D_eff_r = geo.g1_over_vpr_face[-1] * D_e_outer
+    V_full_r = geo.g0_face[-1] * v_e_outer
+
+    safe_D_r = jnp.maximum(D_eff_r, jnp.ones(()) * 1e-30)
+    pe_r = 0.5 * drN * V_full_r / safe_D_r
+    pe_eps = jnp.array(1e-3)
+    pe_s_r = jnp.where(jnp.abs(pe_r) < pe_eps, pe_eps, pe_r)
+    alpha_r = jnp.where(
+        jnp.abs(pe_r) < pe_eps,
+        jnp.array(0.5),
+        jnp.where(
+            pe_r > 10.0, (pe_s_r - 1.0) / pe_s_r,
+            jnp.where(
+                pe_r > pe_eps,
+                ((pe_s_r - 1.0) + (1.0 - pe_s_r / 10.0) ** 5) / pe_s_r,
+                jnp.where(
+                    pe_r >= -10.0,
+                    ((1.0 + pe_s_r / 10.0) ** 5 - 1.0) / pe_s_r,
+                    -1.0 / pe_s_r,
+                ),
+            ),
+        ),
+    )
+
+    A_r = 2.0 * D_eff_r / (drN * drN)
+    numerator_r   = A_r + V_full_r * (1.0 - 2.0 * alpha_r) / drN
+    denominator_r = A_r + 2.0 * V_full_r * (1.0 - alpha_r) / drN
+    n_face_outer = value[-1] * numerator_r / jnp.maximum(denominator_r, jnp.ones(()) * 1e-30)
+    n_face_outer = jnp.clip(n_face_outer, jnp.zeros(()), value[-1])
+    right_face_bc = n_face_outer
+  else:
+    right_face_bc = n_e_right_bc
 
   n_e = cell_variable.CellVariable(
       value=value,
@@ -288,7 +318,7 @@ def get_updated_electron_density(
       left_face_grad_constraint=None,
       left_face_constraint=left_face_bc,
       right_face_grad_constraint=None,
-      right_face_constraint=n_e_right_bc,
+      right_face_constraint=right_face_bc,
   )
   return n_e
 
@@ -785,13 +815,18 @@ def get_updated_ions(
       # Not expected to be reached but needed to avoid linter errors.
       raise ValueError('Unknown impurity mode.')
 
+  # Use right_face_value (not right_face_constraint) so this works for both
+  # Dirichlet and Neumann outer BCs. For Dirichlet: equals right_face_constraint.
+  # For Neumann (use_neumann_outer): extrapolates from the last cell value.
+  n_e_right_face_val = n_e.right_face_value[..., 0]
+
   n_i = cell_variable.CellVariable(
       value=n_e.value * ion_properties.dilution_factor,
       face_centers=geo.rho_face_norm,
       left_face_grad_constraint=None,
       left_face_constraint=n_e.left_face_constraint * ion_properties.dilution_factor_inner_edge,
       right_face_grad_constraint=None,
-      right_face_constraint=n_e.right_face_constraint
+      right_face_constraint=n_e_right_face_val
       * ion_properties.dilution_factor_outer_edge,
   )
 
@@ -811,7 +846,7 @@ def get_updated_ions(
   n_impurity_right_face_constraint = jnp.where(
       ion_properties.dilution_factor_outer_edge == 1.0,
       0.0,
-      (n_e.right_face_constraint - n_i.right_face_constraint * Z_i_face[-1])
+      (n_e_right_face_val - n_i.right_face_constraint * Z_i_face[-1])
       / ion_properties.Z_impurity_face[-1],
   )
 

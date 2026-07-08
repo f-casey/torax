@@ -118,10 +118,13 @@ class CoreProfiles:
   @functools.cached_property
   def pressure_thermal_e(self) -> cell_variable.CellVariable:
     """Electron thermal pressure [Pa]."""
+    # Use right_face_value (not right_face_constraint) to support Neumann outer
+    # BC on n_e (use_neumann_outer=True), where right_face_constraint is None.
+    n_e_rfc = self.n_e.right_face_value[..., 0]
     return cell_variable.CellVariable(
         value=self.n_e.value * self.T_e.value * constants.CONSTANTS.keV_to_J,
         face_centers=self.n_e.face_centers,
-        right_face_constraint=self.n_e.right_face_constraint
+        right_face_constraint=n_e_rfc
         * self.T_e.right_face_constraint
         * constants.CONSTANTS.keV_to_J,
         right_face_grad_constraint=None,
