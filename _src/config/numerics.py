@@ -51,6 +51,7 @@ class RuntimeParams:
   evolve_electron_heat: bool = dataclasses.field(metadata={'static': True})
   evolve_current: bool = dataclasses.field(metadata={'static': True})
   evolve_density: bool = dataclasses.field(metadata={'static': True})
+  evolve_n_n: bool = dataclasses.field(metadata={'static': True})
   exact_t_final: bool = dataclasses.field(metadata={'static': True})
   adaptive_dt: bool = dataclasses.field(metadata={'static': True})
 
@@ -66,6 +67,8 @@ class RuntimeParams:
       evolving_names.append('psi')
     if self.evolve_density:
       evolving_names.append('n_e')
+    if self.evolve_n_n:
+      evolving_names.append('n_n')
     return tuple(evolving_names)
 
 
@@ -97,6 +100,12 @@ class Numerics(torax_pydantic.BaseModelFrozen):
       evolves over time)
     evolve_current: Solve the current equation (current evolves over time).
     evolve_density: Solve the density equation (n evolves over time).
+    evolve_n_n: Solve the neutral density equation (n_n evolves over time,
+      coupled to n_e). Default False. NOT YET FUNCTIONAL: the transport
+      coefficients and cross-coupling source terms for n_n are not yet
+      implemented in calc_coeffs.py. Setting this True will currently error
+      or produce incorrect results -- this flag and evolving_names support
+      are structural plumbing added ahead of that implementation.
     resistivity_multiplier:  1/multiplication factor for sigma (conductivity) to
       reduce current diffusion timescale to be closer to heat diffusion
       timescale
@@ -128,6 +137,7 @@ class Numerics(torax_pydantic.BaseModelFrozen):
   evolve_electron_heat: Annotated[bool, torax_pydantic.JAX_STATIC] = True
   evolve_current: Annotated[bool, torax_pydantic.JAX_STATIC] = False
   evolve_density: Annotated[bool, torax_pydantic.JAX_STATIC] = False
+  evolve_n_n: Annotated[bool, torax_pydantic.JAX_STATIC] = False
   resistivity_multiplier: torax_pydantic.TimeVaryingScalar = (
       torax_pydantic.ValidatedDefault(1.0)
   )
@@ -165,6 +175,8 @@ class Numerics(torax_pydantic.BaseModelFrozen):
       evolving_names.append('psi')
     if self.evolve_density:
       evolving_names.append('n_e')
+    if self.evolve_n_n:
+      evolving_names.append('n_n')
     return tuple(evolving_names)
 
   def build_runtime_params(self, t: chex.Numeric) -> RuntimeParams:
@@ -186,6 +198,7 @@ class Numerics(torax_pydantic.BaseModelFrozen):
         evolve_electron_heat=self.evolve_electron_heat,
         evolve_current=self.evolve_current,
         evolve_density=self.evolve_density,
+        evolve_n_n=self.evolve_n_n,
         exact_t_final=self.exact_t_final,
         adaptive_dt=self.adaptive_dt,
     )
