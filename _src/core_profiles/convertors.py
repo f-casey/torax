@@ -24,6 +24,7 @@ SCALING_FACTORS: Final[Mapping[str, float]] = immutabledict.immutabledict({
     'T_i': 1.0,
     'T_e': 1.0,
     'n_e': 1e20,
+    'n_n': 1e15,
     'psi': 1.0,
 })
 
