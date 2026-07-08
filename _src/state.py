@@ -49,6 +49,8 @@ class CoreProfiles:
       psi: Poloidal flux [Wb].
       psidot: Time derivative of poloidal flux (loop voltage) [V].
       n_e: Electron density [m^-3].
+      n_n: Neutral density [m^-3]. Evolved only when
+        numerics.evolve_n_n is True; otherwise unused.
       n_i: Main ion density [m^-3].
       n_impurity: Impurity density of bundled impurity [m^-3].
       impurity_fractions: Fractional abundances of individual impurity species.
@@ -85,6 +87,7 @@ class CoreProfiles:
   psi: cell_variable.CellVariable
   psidot: cell_variable.CellVariable
   n_e: cell_variable.CellVariable
+  n_n: cell_variable.CellVariable
   n_i: cell_variable.CellVariable
   n_impurity: cell_variable.CellVariable
   impurity_fractions: Mapping[str, array_typing.FloatVector]
