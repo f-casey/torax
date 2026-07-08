@@ -96,11 +96,19 @@ def initial_core_profiles(
       value=jnp.zeros_like(geo.rho, dtype=jax_utils.get_dtype()),
       face_centers=geo.rho_face_norm,
   )
+  # Neutral density: zero-initialised placeholder, matching the psi/psidot
+  # pattern above. Inert until numerics.evolve_n_n is True and the transport
+  # coefficients/cross-coupling terms for it are implemented.
+  n_n = cell_variable.CellVariable(
+      value=jnp.zeros_like(geo.rho, dtype=jax_utils.get_dtype()),
+      face_centers=geo.rho_face_norm,
+  )
 
   core_profiles = state.CoreProfiles(
       T_i=T_i,
       T_e=T_e,
       n_e=n_e,
+      n_n=n_n,
       n_i=ions.n_i,
       Z_i=ions.Z_i,
       Z_i_face=ions.Z_i_face,
