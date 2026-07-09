@@ -339,6 +339,8 @@ def _calc_coeffs_full(
   tic_psi = jnp.ones_like(toc_psi)
   toc_dens_el = jnp.ones_like(geo.vpr)
   tic_dens_el = geo.vpr
+  toc_n_n = jnp.ones_like(geo.vpr)
+  tic_n_n = geo.vpr
 
   # Diffusion term coefficients
   turbulent_transport = physics_models.transport_model(
@@ -366,6 +368,26 @@ def _calc_coeffs_full(
   # No poloidal flux convection term
   v_face_psi = jnp.zeros_like(d_face_psi)
 
+  # Neutral density (n_n) transport -- Phase 1 scaffolding (2026-07-09).
+  # D=0 (Jerome confirmed, no artificial diffusion floor needed), pure
+  # outward advection V=v_n/h_rho. Analytically fixed, not a turbulent-
+  # transport closure, so computed directly here rather than via
+  # physics_models.transport_model -- mirrors psi's pattern above, not n_e's.
+  psi_b = geo.psi[-1]
+  B_face_n_n = jnp.sqrt(jnp.maximum(geo.gm5_face, 1e-10))
+  h_rho_face = 2.0 * psi_b * geo.rho_face_norm / jnp.maximum(B_face_n_n, 1e-6)
+
+  d_face_n_n = jnp.zeros_like(geo.rho_face)
+  # jnp.abs(g0_face): g0_face[0] is negative in this dipole equilibrium (area
+  # vector convention points into the coil, see the Robin BC fix in
+  # getters.py) -- n_n's advection must be uniformly outward everywhere,
+  # unlike n_e's K_n-switched pinch which genuinely changes sign by region.
+  full_v_face_n_n = (
+      jnp.abs(geo.g0_face)
+      * runtime_params.profile_conditions.v_th_n
+      / h_rho_face
+  )
+
   # entire coefficient preceding dT/dr in heat transport equations
   full_chi_face_ion = (
       geo.g1_over_vpr_face
@@ -389,6 +411,21 @@ def _calc_coeffs_full(
 
   # density source vector based both on original and updated core profiles
   source_n_e = merged_source_profiles.total_sources('n_e', geo)
+
+  # Neutral density (n_n) ionisation sink -- Phase 1 (2026-07-09).
+  # Bilinear term n_e*R_iz*n_n, linearised by freezing n_e at its current
+  # value (the standard treatment for a reaction term where only one of the
+  # two factors is the variable being solved in THIS equation -- mirrors how
+  # Qei's implicit_ii/ee terms use the OTHER temperature's current value).
+  # This is the ('n_n','n_n') source_mat entry below. Phase 2 will add the
+  # symmetric ('n_e','n_n') cross term to enable the live n_e source; for
+  # Phase 1 n_e's source stays exactly as externally configured (untouched).
+  source_mat_n_n_n_n = (
+      -core_profiles.n_e.value
+      * runtime_params.profile_conditions.R_iz
+      * geo.vpr
+  )
+  source_n_n = jnp.zeros_like(geo.rho)
 
   # Pereverzev-Corrigan correction for heat and particle transport
   # (deals with stiff nonlinearity of transport coefficients)
@@ -544,12 +581,14 @@ def _calc_coeffs_full(
       'T_e': toc_T_e,
       'psi': toc_psi,
       'n_e': toc_dens_el,
+      'n_n': toc_n_n,
   }
   var_to_tic = {
       'T_i': tic_T_i,
       'T_e': tic_T_e,
       'psi': tic_psi,
       'n_e': tic_dens_el,
+      'n_n': tic_n_n,
   }
   transient_out_cell = tuple(var_to_toc[var] for var in evolving_names)
   transient_in_cell = tuple(var_to_tic[var] for var in evolving_names)
@@ -559,6 +598,7 @@ def _calc_coeffs_full(
       'T_e': full_chi_face_el,
       'psi': d_face_psi,
       'n_e': full_d_face_el,
+      'n_n': d_face_n_n,
   }
   d_face = tuple(var_to_d_face[var] for var in evolving_names)
 
@@ -567,6 +607,7 @@ def _calc_coeffs_full(
       'T_e': v_heat_face_el,
       'psi': v_face_psi,
       'n_e': full_v_face_el,
+      'n_n': full_v_face_n_n,
   }
   v_face = tuple(var_to_v_face.get(var) for var in evolving_names)
 
@@ -579,6 +620,7 @@ def _calc_coeffs_full(
       ('T_e', 'T_i'): source_mat_ei,
       ('T_e', 'T_e'): source_mat_ee,
       ('n_e', 'n_e'): source_mat_nn,
+      ('n_n', 'n_n'): source_mat_n_n_n_n,
       ('psi', 'psi'): source_mat_psi,
   }
   source_mat_cell = tuple(
@@ -593,6 +635,7 @@ def _calc_coeffs_full(
       'T_e': source_e / convertors.SCALING_FACTORS['T_e'],
       'psi': source_psi / convertors.SCALING_FACTORS['psi'],
       'n_e': source_n_e / convertors.SCALING_FACTORS['n_e'],
+      'n_n': source_n_n / convertors.SCALING_FACTORS['n_n'],
   }
   source_cell = tuple(var_to_source.get(var) for var in evolving_names)
 
@@ -626,12 +669,14 @@ def _calc_coeffs_reduced(
   tic_T_e = core_profiles.n_e.value * geo.vpr ** (5.0 / 3.0)
   tic_psi = jnp.ones_like(geo.vpr)
   tic_dens_el = geo.vpr
+  tic_n_n = geo.vpr
 
   var_to_tic = {
       'T_i': tic_T_i,
       'T_e': tic_T_e,
       'psi': tic_psi,
       'n_e': tic_dens_el,
+      'n_n': tic_n_n,
   }
   transient_in_cell = tuple(var_to_tic[var] for var in evolving_names)
 
