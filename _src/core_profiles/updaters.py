@@ -297,6 +297,17 @@ def provide_core_profiles_t_plus_dt(
       only_boundary_condition=numerics.evolve_density,
       original_n_e_value=core_profiles_t.n_e,
   )
+  # n_e passed only when evolve_n_n is True -- mirrors the transport_coeffs
+  # guard above: the argument is only meaningful (recycling BC) when the
+  # corresponding physics is actually turned on, otherwise
+  # get_updated_neutral_density falls back to the plain n_n_left_bc default.
+  n_n = getters.get_updated_neutral_density(
+      profile_conditions_t_plus_dt,
+      geo_t_plus_dt,
+      only_boundary_condition=numerics.evolve_n_n,
+      original_n_n_value=core_profiles_t.n_n,
+      n_e=core_profiles_t.n_e if numerics.evolve_n_n else None,
+  )
   toroidal_angular_velocity = getters.get_updated_toroidal_angular_velocity(
       profile_conditions_t_plus_dt, geo_t_plus_dt
   )
@@ -309,6 +320,7 @@ def provide_core_profiles_t_plus_dt(
       T_e=T_e,
       psi=psi,
       n_e=n_e,
+      n_n=n_n,
       toroidal_angular_velocity=toroidal_angular_velocity,
   )
   return core_profiles_t_plus_dt
