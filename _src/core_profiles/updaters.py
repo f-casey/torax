@@ -171,7 +171,7 @@ def update_core_and_source_profiles_after_step(
       T_e=updated_core_profiles_t_plus_dt.T_e,
       psi=updated_core_profiles_t_plus_dt.psi,
       n_e=updated_core_profiles_t_plus_dt.n_e,
-      n_n=core_profiles_t_plus_dt.n_n,  # not yet solved; plain passthrough
+      n_n=updated_core_profiles_t_plus_dt.n_n,
       n_i=ions.n_i,
       n_impurity=ions.n_impurity,
       impurity_fractions=ions.impurity_fractions,
