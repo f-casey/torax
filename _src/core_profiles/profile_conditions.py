@@ -73,6 +73,7 @@ class RuntimeParams:
   n_e_right_bc: array_typing.FloatScalar
   n_e_right_bc_is_fGW: bool
   n_e_robin_bc_c_s: array_typing.FloatScalar
+  n_n_left_bc: array_typing.FloatScalar
   current_profile_nu: float
   use_robin_bc: bool = dataclasses.field(metadata={'static': True})
   use_neumann_outer: bool = dataclasses.field(metadata={'static': True})
@@ -203,6 +204,9 @@ class ProfileConditions(torax_pydantic.BaseModelFrozen):
   use_robin_bc: Annotated[bool, torax_pydantic.JAX_STATIC] = False
   use_neumann_outer: Annotated[bool, torax_pydantic.JAX_STATIC] = False
   n_e_robin_bc_c_s: torax_pydantic.PositiveTimeVaryingScalar | None = None
+  n_n_left_bc: torax_pydantic.PositiveTimeVaryingScalar = (
+      torax_pydantic.ValidatedDefault(1e12)
+  )
   current_profile_nu: float = 1.0
   initial_j_is_total_current: Annotated[bool, torax_pydantic.JAX_STATIC] = False
   # TODO(b/434175938): Remove this before the V2 API release in place of
