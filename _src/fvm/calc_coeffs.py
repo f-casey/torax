@@ -375,7 +375,8 @@ def _calc_coeffs_full(
   # physics_models.transport_model -- mirrors psi's pattern above, not n_e's.
   psi_b = geo.psi[-1]
   B_face_n_n = jnp.sqrt(jnp.maximum(geo.gm5_face, 1e-10))
-  h_rho_face = 2.0 * psi_b * geo.rho_face_norm / jnp.maximum(B_face_n_n, 1e-6)
+  h_rho_face = 2.0 * psi_b * geo.rho_face_norm / jnp.maximum(B_face_n_n, 1e-10)
+  h_rho_face = jnp.maximum(h_rho_face, 1e-6)
 
   d_face_n_n = jnp.zeros_like(geo.rho_face)
   # jnp.abs(g0_face): g0_face[0] is negative in this dipole equilibrium (area
