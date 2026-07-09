@@ -96,12 +96,19 @@ def initial_core_profiles(
       value=jnp.zeros_like(geo.rho, dtype=jax_utils.get_dtype()),
       face_centers=geo.rho_face_norm,
   )
-  # Neutral density: zero-initialised placeholder, matching the psi/psidot
-  # pattern above. Inert until numerics.evolve_n_n is True and the transport
-  # coefficients/cross-coupling terms for it are implemented.
-  n_n = cell_variable.CellVariable(
-      value=jnp.zeros_like(geo.rho, dtype=jax_utils.get_dtype()),
-      face_centers=geo.rho_face_norm,
+  # Neutral density: must be constructed via get_updated_neutral_density
+  # (not a hand-rolled zero-init like psi/psidot above) so that
+  # left_face_constraint/left_face_grad_constraint have the SAME pytree
+  # structure here as every subsequent call in provide_core_profiles_t_plus_dt
+  # produces -- get_updated_neutral_density always sets a real
+  # left_face_constraint value and left_face_grad_constraint=None, whereas a
+  # bare CellVariable(value=..., face_centers=...) defaults the other way
+  # (left_face_constraint=None, left_face_grad_constraint=<zero array>).
+  # That mismatch made jax.lax.while_loop reject the carry (differing pytree
+  # structure between the initial and post-step state) -- found via the Run
+  # C_RS regression check, 2026-07-09.
+  n_n = getters.get_updated_neutral_density(
+      runtime_params.profile_conditions, geo, n_e=n_e
   )
 
   core_profiles = state.CoreProfiles(
