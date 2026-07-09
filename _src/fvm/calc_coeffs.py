@@ -396,6 +396,16 @@ def _calc_coeffs_full(
       * runtime_params.profile_conditions.v_th_n
       / h_rho_face
   )
+  # Coordinate-velocity blowup near rho=0 (h_rho->0) causes severe numerical
+  # diffusion in the pure-advection (D=0) FVM scheme at large Courant number
+  # -- clip it, mirroring the existing V_clip precedent for n_e's transport
+  # in QLDipole_nU (ql_dipole_validation_v3.2.ipynb cell 17), though at a
+  # scale appropriate to n_n's much faster coordinate velocity. Callers
+  # should set n_n_v_clip to roughly cell_width/dt (Courant~1) for their dt;
+  # defaults to 1e10 (effectively unclipped) if unset.
+  full_v_face_n_n = jnp.minimum(
+      full_v_face_n_n, runtime_params.profile_conditions.n_n_v_clip
+  )
 
   # entire coefficient preceding dT/dr in heat transport equations
   full_chi_face_ion = (
