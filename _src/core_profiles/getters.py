@@ -328,6 +328,7 @@ def get_updated_neutral_density(
     geo: geometry.Geometry,
     only_boundary_condition: bool = False,
     original_n_n_value: cell_variable.CellVariable | None = None,
+    n_e: cell_variable.CellVariable | None = None,
 ) -> cell_variable.CellVariable:
   """Gets initial and/or prescribed neutral density profiles.
 
@@ -336,9 +337,17 @@ def get_updated_neutral_density(
   stage; mirrors the simple T_i/T_e pattern rather than n_e's Greenwald/nbar
   machinery, which doesn't apply here).
 
-  Inner BC (n_n_left_bc) is a plain Dirichlet value, default 1e12, intended
-  to be overridden at runtime by the recycling condition
-  R_RECYCLE * n_e(0) * c_s / v_th_n -- that override is not yet wired in.
+  Inner BC is the recycling condition n_n(0) = R_RECYCLE * n_e(0) * c_s /
+  v_th_n, recomputed from the CURRENT n_e each call (mirrors what the
+  external operator-split loop did, now inside TORAX). c_s uses a
+  placeholder T_e=100eV and hydrogen mass -- matching the notebook's own
+  standalone c_s convention exactly, NOT core_profiles.A_i (which reflects
+  the configured main_ion='D', deuterium, ~2x hydrogen mass) -- consistency
+  with the notebook's external validation (Run C_RS, evolve_neutral_pde)
+  matters more here than using the "real" configured ion species, since
+  that's what we're being validated against. If `n_e` is not provided
+  (e.g. during initialization, before any n_e state exists yet), falls back
+  to the plain n_n_left_bc Dirichlet default (1e12).
 
   Outer BC is zero-gradient (outflow): no face-value constraint, matching
   the natural upwind exit for pure advection (n_n has D=0, per Jerome).
@@ -353,11 +362,25 @@ def get_updated_neutral_density(
   else:
     value = jnp.full_like(geo.rho, 1e12)
 
+  if n_e is not None:
+    T_e_placeholder_eV = 100.0
+    m_i_hydrogen = 1.67e-27
+    c_s = jnp.sqrt(1.602e-19 * T_e_placeholder_eV / m_i_hydrogen)
+    n_e_inner = n_e.value[0]
+    left_face_bc = (
+        profile_conditions_params.R_RECYCLE
+        * n_e_inner
+        * c_s
+        / profile_conditions_params.v_th_n
+    )
+  else:
+    left_face_bc = profile_conditions_params.n_n_left_bc
+
   n_n = cell_variable.CellVariable(
       value=value,
       face_centers=geo.rho_face_norm,
       left_face_grad_constraint=None,
-      left_face_constraint=profile_conditions_params.n_n_left_bc,
+      left_face_constraint=left_face_bc,
       right_face_grad_constraint=jnp.zeros(()),
       right_face_constraint=None,
   )
