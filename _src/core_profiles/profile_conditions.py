@@ -74,6 +74,9 @@ class RuntimeParams:
   n_e_right_bc_is_fGW: bool
   n_e_robin_bc_c_s: array_typing.FloatScalar
   n_n_left_bc: array_typing.FloatScalar
+  v_th_n: array_typing.FloatScalar
+  R_iz: array_typing.FloatScalar
+  R_RECYCLE: array_typing.FloatScalar
   current_profile_nu: float
   use_robin_bc: bool = dataclasses.field(metadata={'static': True})
   use_neumann_outer: bool = dataclasses.field(metadata={'static': True})
@@ -206,6 +209,18 @@ class ProfileConditions(torax_pydantic.BaseModelFrozen):
   n_e_robin_bc_c_s: torax_pydantic.PositiveTimeVaryingScalar | None = None
   n_n_left_bc: torax_pydantic.PositiveTimeVaryingScalar = (
       torax_pydantic.ValidatedDefault(1e12)
+  )
+  # Neutral transport physics constants (Phase 1 scaffolding for n_n).
+  # Defaults match T_neutral_eV=1, T_e=100eV, hydrogen mass -- see
+  # ql_dipole_validation_v3.2.ipynb cell 18.
+  v_th_n: torax_pydantic.PositiveTimeVaryingScalar = (
+      torax_pydantic.ValidatedDefault(1.385e4)
+  )
+  R_iz: torax_pydantic.PositiveTimeVaryingScalar = (
+      torax_pydantic.ValidatedDefault(3.17e-14)
+  )
+  R_RECYCLE: torax_pydantic.PositiveTimeVaryingScalar = (
+      torax_pydantic.ValidatedDefault(0.99)
   )
   current_profile_nu: float = 1.0
   initial_j_is_total_current: Annotated[bool, torax_pydantic.JAX_STATIC] = False
