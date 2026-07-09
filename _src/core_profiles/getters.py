@@ -323,6 +323,47 @@ def get_updated_electron_density(
   return n_e
 
 
+def get_updated_neutral_density(
+    profile_conditions_params: profile_conditions.RuntimeParams,
+    geo: geometry.Geometry,
+    only_boundary_condition: bool = False,
+    original_n_n_value: cell_variable.CellVariable | None = None,
+) -> cell_variable.CellVariable:
+  """Gets initial and/or prescribed neutral density profiles.
+
+  Initial profile is a flat 1e12 m^-3 -- not yet a user-configurable
+  profile_conditions field (only the boundary conditions are exposed at this
+  stage; mirrors the simple T_i/T_e pattern rather than n_e's Greenwald/nbar
+  machinery, which doesn't apply here).
+
+  Inner BC (n_n_left_bc) is a plain Dirichlet value, default 1e12, intended
+  to be overridden at runtime by the recycling condition
+  R_RECYCLE * n_e(0) * c_s / v_th_n -- that override is not yet wired in.
+
+  Outer BC is zero-gradient (outflow): no face-value constraint, matching
+  the natural upwind exit for pure advection (n_n has D=0, per Jerome).
+  """
+  if only_boundary_condition:
+    if original_n_n_value is None:
+      raise ValueError(
+          'original_n_n_value must be provided when only updating the '
+          'boundary condition.'
+      )
+    value = original_n_n_value.value
+  else:
+    value = jnp.full_like(geo.rho, 1e12)
+
+  n_n = cell_variable.CellVariable(
+      value=value,
+      face_centers=geo.rho_face_norm,
+      left_face_grad_constraint=None,
+      left_face_constraint=profile_conditions_params.n_n_left_bc,
+      right_face_grad_constraint=jnp.zeros(()),
+      right_face_constraint=None,
+  )
+  return n_n
+
+
 def get_updated_psi(
     profile_conditions_params: profile_conditions.RuntimeParams,
     geo: geometry.Geometry,
