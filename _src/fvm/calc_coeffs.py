@@ -376,7 +376,15 @@ def _calc_coeffs_full(
   psi_b = geo.psi[-1]
   B_face_n_n = jnp.sqrt(jnp.maximum(geo.gm5_face, 1e-10))
   h_rho_face = 2.0 * psi_b * geo.rho_face_norm / jnp.maximum(B_face_n_n, 1e-10)
-  h_rho_face = jnp.maximum(h_rho_face, 1e-6)
+  # h_rho_face[0] is singular (rho_face_norm[0]=0 exactly). Rather than an
+  # arbitrary floor (which mismatched this geometry's natural h_rho scale and
+  # produced a spurious velocity spike at that face), replace it with the
+  # first cell-centre h_rho value -- standard FVM treatment for a coordinate
+  # singularity at the domain boundary, and finite since rho_norm[0] =
+  # delta_rho/2 > 0.
+  B_cell_n_n = jnp.sqrt(jnp.maximum(geo.gm5, 1e-10))
+  h_rho_cell = 2.0 * psi_b * geo.rho_norm / jnp.maximum(B_cell_n_n, 1e-10)
+  h_rho_face = h_rho_face.at[0].set(h_rho_cell[0])
 
   d_face_n_n = jnp.zeros_like(geo.rho_face)
   # jnp.abs(g0_face): g0_face[0] is negative in this dipole equilibrium (area
@@ -388,12 +396,6 @@ def _calc_coeffs_full(
       * runtime_params.profile_conditions.v_th_n
       / h_rho_face
   )
-  # Inner face is a Dirichlet BC (n_n(0) set by recycling), so the advection
-  # coefficient there is overridden by the BC anyway -- zero it explicitly
-  # to avoid the h_rho coordinate singularity rather than relying on the
-  # h_rho_face floor, which is orders of magnitude off this geometry's
-  # natural scale and produces a spurious velocity spike at that face.
-  full_v_face_n_n = full_v_face_n_n.at[0].set(0.0)
 
   # entire coefficient preceding dT/dr in heat transport equations
   full_chi_face_ion = (
