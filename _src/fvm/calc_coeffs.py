@@ -388,6 +388,12 @@ def _calc_coeffs_full(
       * runtime_params.profile_conditions.v_th_n
       / h_rho_face
   )
+  # Inner face is a Dirichlet BC (n_n(0) set by recycling), so the advection
+  # coefficient there is overridden by the BC anyway -- zero it explicitly
+  # to avoid the h_rho coordinate singularity rather than relying on the
+  # h_rho_face floor, which is orders of magnitude off this geometry's
+  # natural scale and produces a spurious velocity spike at that face.
+  full_v_face_n_n = full_v_face_n_n.at[0].set(0.0)
 
   # entire coefficient preceding dT/dr in heat transport equations
   full_chi_face_ion = (
