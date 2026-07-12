@@ -398,13 +398,23 @@ def _calc_coeffs_full(
   )
   # Coordinate-velocity blowup near rho=0 (h_rho->0) causes severe numerical
   # diffusion in the pure-advection (D=0) FVM scheme at large Courant number
-  # -- clip it, mirroring the existing V_clip precedent for n_e's transport
-  # in QLDipole_nU (ql_dipole_validation_v3.2.ipynb cell 17), though at a
-  # scale appropriate to n_n's much faster coordinate velocity. Callers
-  # should set n_n_v_clip to roughly cell_width/dt (Courant~1) for their dt;
-  # defaults to 1e10 (effectively unclipped) if unset.
-  full_v_face_n_n = jnp.minimum(
-      full_v_face_n_n, runtime_params.profile_conditions.n_n_v_clip
+  # right at the inner face -- clip it there ONLY, mirroring the existing
+  # V_clip precedent for n_e's transport in QLDipole_nU
+  # (ql_dipole_validation_v3.2.ipynb cell 17) but re-scoped (2026-07-10) to
+  # the singular face alone. Applying the clip domain-wide (the original
+  # scaffolding) suppressed a genuine physical feature: n_n ~ Gamma/(V_rho*u)
+  # is not required to be monotonic even though the flux Gamma is -- V_rho*u
+  # is itself strongly non-monotonic in this dipole geometry, producing a
+  # real rise-then-decline n_n profile (confirmed by the validated external
+  # evolve_neutral_pde reference at 0.00% particle-balance imbalance). Only
+  # face[0] sits exactly at the h_rho coordinate singularity (rho_face_norm=0)
+  # and needs regularising; every other face already uses the smooth,
+  # physical h_rho and should be left alone. Callers should set n_n_v_clip
+  # for their target inner-face Courant number (see the notebook's dedicated
+  # cell for the exact formula); defaults to 1e10 (effectively unclipped) if
+  # unset.
+  full_v_face_n_n = full_v_face_n_n.at[0].set(
+      jnp.minimum(full_v_face_n_n[0], runtime_params.profile_conditions.n_n_v_clip)
   )
 
   # entire coefficient preceding dT/dr in heat transport equations
