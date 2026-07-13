@@ -398,23 +398,28 @@ def _calc_coeffs_full(
   )
   # Coordinate-velocity blowup near rho=0 (h_rho->0) causes severe numerical
   # diffusion in the pure-advection (D=0) FVM scheme at large Courant number
-  # right at the inner face -- clip it there ONLY, mirroring the existing
+  # near the inner faces -- clip only those faces, mirroring the existing
   # V_clip precedent for n_e's transport in QLDipole_nU
   # (ql_dipole_validation_v3.2.ipynb cell 17) but re-scoped (2026-07-10) to
-  # the singular face alone. Applying the clip domain-wide (the original
-  # scaffolding) suppressed a genuine physical feature: n_n ~ Gamma/(V_rho*u)
-  # is not required to be monotonic even though the flux Gamma is -- V_rho*u
-  # is itself strongly non-monotonic in this dipole geometry, producing a
-  # real rise-then-decline n_n profile (confirmed by the validated external
-  # evolve_neutral_pde reference at 0.00% particle-balance imbalance). Only
-  # face[0] sits exactly at the h_rho coordinate singularity (rho_face_norm=0)
-  # and needs regularising; every other face already uses the smooth,
-  # physical h_rho and should be left alone. Callers should set n_n_v_clip
-  # for their target inner-face Courant number (see the notebook's dedicated
-  # cell for the exact formula); defaults to 1e10 (effectively unclipped) if
-  # unset.
-  full_v_face_n_n = full_v_face_n_n.at[0].set(
-      jnp.minimum(full_v_face_n_n[0], runtime_params.profile_conditions.n_n_v_clip)
+  # the near-singular faces alone. Applying the clip domain-wide (the
+  # original scaffolding) suppressed a genuine physical feature: n_n ~
+  # Gamma/(V_rho*u) is not required to be monotonic even though the flux
+  # Gamma is -- V_rho*u is itself strongly non-monotonic in this dipole
+  # geometry, producing a real rise-then-decline n_n profile (confirmed by
+  # the validated external evolve_neutral_pde reference at 0.00%
+  # particle-balance imbalance). Clipping face[0] alone is insufficient:
+  # h_rho grows gradually (not a step) near the core, so faces 1-2 also sit
+  # above Courant~10 for a typical dt even though only face[0] is exactly
+  # singular (empirically: face[0]=48, face[1]=24, face[2]=12, face[3]=7.8
+  # at DT_PHASE1=tau_n/1000) -- clip the innermost 3 faces uniformly so the
+  # whole near-singular region is regularised together, leaving face 3
+  # onward (already at or below the target Courant number) untouched.
+  # Callers should set n_n_v_clip for their target inner-face Courant number
+  # (see the notebook's dedicated cell for the exact formula); defaults to
+  # 1e10 (effectively unclipped) if unset.
+  n_n_v_clip = runtime_params.profile_conditions.n_n_v_clip
+  full_v_face_n_n = full_v_face_n_n.at[:3].set(
+      jnp.minimum(full_v_face_n_n[:3], n_n_v_clip)
   )
 
   # entire coefficient preceding dT/dr in heat transport equations
