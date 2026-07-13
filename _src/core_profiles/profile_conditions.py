@@ -77,7 +77,6 @@ class RuntimeParams:
   v_th_n: array_typing.FloatScalar
   R_iz: array_typing.FloatScalar
   R_RECYCLE: array_typing.FloatScalar
-  n_n_v_clip: array_typing.FloatScalar
   current_profile_nu: float
   use_robin_bc: bool = dataclasses.field(metadata={'static': True})
   use_neumann_outer: bool = dataclasses.field(metadata={'static': True})
@@ -222,15 +221,6 @@ class ProfileConditions(torax_pydantic.BaseModelFrozen):
   )
   R_RECYCLE: torax_pydantic.PositiveTimeVaryingScalar = (
       torax_pydantic.ValidatedDefault(0.99)
-  )
-  # Clip on n_n's coordinate-velocity advection coefficient (v_th_n/h_rho),
-  # in units of 1/s (d(rho_hat)/dt). h_rho->0 near rho=0 makes this blow up;
-  # left effectively unclipped (1e10) by default so existing configs are
-  # unaffected -- callers validating against a specific dt should set this
-  # to roughly cell_width/dt (Courant~1) to avoid severe numerical diffusion
-  # from a pure-advection (D=0) equation at large Courant number.
-  n_n_v_clip: torax_pydantic.PositiveTimeVaryingScalar = (
-      torax_pydantic.ValidatedDefault(1e10)
   )
   current_profile_nu: float = 1.0
   initial_j_is_total_current: Annotated[bool, torax_pydantic.JAX_STATIC] = False

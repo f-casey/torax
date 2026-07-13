@@ -396,23 +396,21 @@ def _calc_coeffs_full(
       * runtime_params.profile_conditions.v_th_n
       / h_rho_face
   )
-  # Coordinate-velocity blowup near rho=0 (h_rho->0) causes severe numerical
-  # diffusion in the pure-advection (D=0) FVM scheme at large Courant number
-  # near the inner faces. A hard jnp.minimum clip on a fixed number of faces
-  # (tried 2026-07-10) created a discontinuous jump in v_face_n_n right at
-  # the clipped/unclipped boundary, producing a visible non-physical notch
-  # in the solved n_n profile one cell in from rho=0. Use a smooth rational
-  # clip instead, applied uniformly across all faces with no face-index
-  # branching: asymptotes to n_n_v_clip as v_face_n_n->inf and is ~identity
-  # when v_face_n_n << n_n_v_clip, with no discontinuity anywhere in the
-  # domain. Mirrors the tanh-based smooth K_n switch already used in
-  # QLDipole_nU (ql_dipole_validation_v3.2.ipynb cell 17) for the same
-  # reason -- avoiding hard discontinuities under JAX autodiff/solve.
-  # Callers should set n_n_v_clip for their target inner-face Courant number
-  # (see the notebook's dedicated cell for the exact formula); defaults to
-  # 1e10 (effectively unclipped) if unset.
-  n_n_v_clip = runtime_params.profile_conditions.n_n_v_clip
-  full_v_face_n_n = full_v_face_n_n / (1.0 + jnp.abs(full_v_face_n_n) / n_n_v_clip)
+  # No velocity clip: TORAX's solver uses theta=1 (fully implicit backward
+  # Euler), which is unconditionally stable (see the TORAX paper, section
+  # III.C.1) -- there is no CFL condition to satisfy, so no Courant-based
+  # regularization of full_v_face_n_n is needed. The coordinate singularity
+  # at face[0] is already handled above (h_rho_face[0] replaced with the
+  # first cell-centre value); the Peclet-weighted alpha scheme in
+  # convection_terms.py automatically goes to full upwinding when D=0, which
+  # is the correct behavior for pure advection. A velocity clip was tried
+  # here (2026-07-10 through 2026-07-13) to control what was believed to be
+  # a numerical-diffusion problem, but investigation traced the actual
+  # observed discrepancies to the clip itself -- its CFL-derived target
+  # value suppressed velocity across the entire domain, not just near the
+  # singularity, at every resolution tested (N=50 through N=400). Removed
+  # entirely; see concepts/coordinate-velocity-clipping in the project vault
+  # for the full debugging history.
 
   # entire coefficient preceding dT/dr in heat transport equations
   full_chi_face_ion = (
