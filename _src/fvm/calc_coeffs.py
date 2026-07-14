@@ -156,9 +156,19 @@ def _calculate_pereverzev_flux(
   )
 
   d_face_per_el = runtime_params.solver.D_pereverzev
+  # Epsilon floor (2026-07-16) -- matches the safe_D pattern used for the
+  # analogous division in getters.py's Robin BC calc (safe_D = max(D_eff,
+  # 1e-30)). Without this floor, n_e.face_value() can legitimately be exactly
+  # 0.0 at the left face: with a Robin BC and zero initial transport (D_eff=
+  # V_eff=0 everywhere, e.g. a uniform IC with the K_n switch fully off), the
+  # Robin formula's numerator is 0 regardless of denominator, so it degenerates
+  # to n_face=0 exactly -- dividing by that here produces inf/nan that
+  # corrupts the whole solve. Every other division in this codebase already
+  # guards its denominator this way; this one didn't.
+  safe_n_e_face_value = jnp.maximum(core_profiles.n_e.face_value(), 1e-30)
   v_face_per_el = (
       core_profiles.n_e.face_grad()
-      / core_profiles.n_e.face_value()
+      / safe_n_e_face_value
       * d_face_per_el
       * geo_factor
   )
