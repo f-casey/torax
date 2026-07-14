@@ -459,11 +459,17 @@ def _calc_coeffs_full(
   # value (the standard treatment for a reaction term where only one of the
   # two factors is the variable being solved in THIS equation -- mirrors how
   # Qei's implicit_ii/ee terms use the OTHER temperature's current value).
-  # This is the ('n_n','n_n') source_mat entry below.
+  # This is the ('n_n','n_n') source_mat entry below -- diagonal (row=col),
+  # so its implicit scaling ratio SCALING_FACTORS['n_n']/SCALING_FACTORS['n_n']
+  # = 1 trivially; no correction needed (printed explicitly for the record).
+  _nn_nn_scaling_ratio = (
+      convertors.SCALING_FACTORS['n_n'] / convertors.SCALING_FACTORS['n_n']
+  )
   source_mat_n_n_n_n = (
       -core_profiles.n_e.value
       * runtime_params.profile_conditions.R_iz
       * geo.vpr
+      * _nn_nn_scaling_ratio
   )
   source_n_n = jnp.zeros_like(geo.rho)
 
@@ -478,10 +484,26 @@ def _calc_coeffs_full(
   # evolve_density=False (Phase 1/2), n_e is not in evolving_names so this
   # entry is never selected into source_mat_cell regardless of being defined
   # here.
+  #
+  # Scaling-factor correction (2026-07-15): the solver's own state vector is
+  # x_scaled = n_physical/SCALING_FACTORS[name] (convertors.py). A
+  # source_mat[(row,col)] entry multiplies x_col_scaled, so to represent the
+  # PHYSICAL coefficient C correctly within row's own scaled equation it
+  # must be rescaled by SCALING_FACTORS[col]/SCALING_FACTORS[row]. Every
+  # source_mat entry before this one was either diagonal (ratio=1 trivially)
+  # or (Qei's T_i/T_e cross terms) between variables sharing the same
+  # SCALING_FACTORS=1.0 (ratio=1 again) -- this is the first cross-coupling
+  # entry between variables with genuinely different scaling factors
+  # (n_e:1e20, n_n:1e15). Without this factor the term was ~1e5x too large,
+  # causing Phase 3 to diverge to NaN within the first step.
+  _ne_nn_scaling_ratio = (
+      convertors.SCALING_FACTORS['n_n'] / convertors.SCALING_FACTORS['n_e']
+  )
   source_mat_n_e_n_n = (
       core_profiles.n_e.value
       * runtime_params.profile_conditions.R_iz
       * geo.vpr
+      * _ne_nn_scaling_ratio
   )
 
   # Pereverzev-Corrigan correction for heat and particle transport
