@@ -77,6 +77,7 @@ class RuntimeParams:
   v_th_n: array_typing.FloatScalar
   R_iz: array_typing.FloatScalar
   R_RECYCLE: array_typing.FloatScalar
+  rho_min: array_typing.FloatScalar
   current_profile_nu: float
   use_robin_bc: bool = dataclasses.field(metadata={'static': True})
   use_neumann_outer: bool = dataclasses.field(metadata={'static': True})
@@ -221,6 +222,15 @@ class ProfileConditions(torax_pydantic.BaseModelFrozen):
   )
   R_RECYCLE: torax_pydantic.PositiveTimeVaryingScalar = (
       torax_pydantic.ValidatedDefault(0.99)
+  )
+  # Physical inner boundary of the computational domain, rho_hat=rho_min,
+  # NOT a numerical parameter -- for the Junior equilibrium this should be
+  # set to the first closed flux surface (fcfs), rho_min~0.2, below which
+  # the domain is inside the magnet coil and non-physical. Default 0.0
+  # preserves prior behaviour (domain starting at the magnetic axis) for
+  # configs that don't set this explicitly.
+  rho_min: torax_pydantic.NonNegativeTimeVaryingScalar = (
+      torax_pydantic.ValidatedDefault(0.0)
   )
   current_profile_nu: float = 1.0
   initial_j_is_total_current: Annotated[bool, torax_pydantic.JAX_STATIC] = False

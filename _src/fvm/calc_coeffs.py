@@ -373,18 +373,25 @@ def _calc_coeffs_full(
   # outward advection V=v_n/h_rho. Analytically fixed, not a turbulent-
   # transport closure, so computed directly here rather than via
   # physics_models.transport_model -- mirrors psi's pattern above, not n_e's.
+  #
+  # rho_min (2026-07-14): the computational domain starts at the first
+  # closed flux surface (fcfs), rho_hat=rho_min, not at the magnetic axis
+  # rho_hat=0 -- everything inside rho_min is inside the magnet coil and
+  # non-physical for the Junior equilibrium. geo.rho_face_norm/geo.rho_norm
+  # remain TORAX's own internal [0,1] mesh coordinate (required structurally
+  # by Grid1D); rho_hat_face/rho_hat_cell below are the TRUE physical
+  # flux-surface label, affinely mapped from that internal coordinate. This
+  # means rho_hat never actually reaches 0 in this domain -- the h_rho
+  # coordinate singularity at rho_hat=0 that drove the entire clip/face[0]
+  # regularization investigation (see concepts/coordinate-velocity-clipping
+  # in the project vault) simply does not exist in the physical domain, so
+  # neither that fix nor a velocity clip is needed here.
+  rho_min = runtime_params.profile_conditions.rho_min
+  rho_hat_face = rho_min + (1.0 - rho_min) * geo.rho_face_norm
+  rho_hat_cell = rho_min + (1.0 - rho_min) * geo.rho_norm
   psi_b = geo.psi[-1]
   B_face_n_n = jnp.sqrt(jnp.maximum(geo.gm5_face, 1e-10))
-  h_rho_face = 2.0 * psi_b * geo.rho_face_norm / jnp.maximum(B_face_n_n, 1e-10)
-  # h_rho_face[0] is singular (rho_face_norm[0]=0 exactly). Rather than an
-  # arbitrary floor (which mismatched this geometry's natural h_rho scale and
-  # produced a spurious velocity spike at that face), replace it with the
-  # first cell-centre h_rho value -- standard FVM treatment for a coordinate
-  # singularity at the domain boundary, and finite since rho_norm[0] =
-  # delta_rho/2 > 0.
-  B_cell_n_n = jnp.sqrt(jnp.maximum(geo.gm5, 1e-10))
-  h_rho_cell = 2.0 * psi_b * geo.rho_norm / jnp.maximum(B_cell_n_n, 1e-10)
-  h_rho_face = h_rho_face.at[0].set(h_rho_cell[0])
+  h_rho_face = 2.0 * psi_b * rho_hat_face / jnp.maximum(B_face_n_n, 1e-10)
 
   d_face_n_n = jnp.zeros_like(geo.rho_face)
   # jnp.abs(g0_face): g0_face[0] is negative in this dipole equilibrium (area
@@ -396,21 +403,18 @@ def _calc_coeffs_full(
       * runtime_params.profile_conditions.v_th_n
       / h_rho_face
   )
-  # No velocity clip: TORAX's solver uses theta=1 (fully implicit backward
-  # Euler), which is unconditionally stable (see the TORAX paper, section
-  # III.C.1) -- there is no CFL condition to satisfy, so no Courant-based
-  # regularization of full_v_face_n_n is needed. The coordinate singularity
-  # at face[0] is already handled above (h_rho_face[0] replaced with the
-  # first cell-centre value); the Peclet-weighted alpha scheme in
-  # convection_terms.py automatically goes to full upwinding when D=0, which
-  # is the correct behavior for pure advection. A velocity clip was tried
-  # here (2026-07-10 through 2026-07-13) to control what was believed to be
-  # a numerical-diffusion problem, but investigation traced the actual
-  # observed discrepancies to the clip itself -- its CFL-derived target
-  # value suppressed velocity across the entire domain, not just near the
-  # singularity, at every resolution tested (N=50 through N=400). Removed
-  # entirely; see concepts/coordinate-velocity-clipping in the project vault
-  # for the full debugging history.
+  # No velocity clip: with the domain starting at rho_min>0, there is no
+  # coordinate singularity for a clip to regularize, and TORAX's solver
+  # (theta=1, fully implicit backward Euler) is unconditionally stable
+  # regardless (TORAX paper, section III.C.1). A velocity clip was tried
+  # (2026-07-10 through 2026-07-13) when the domain still incorrectly
+  # started at rho_hat=0; investigation traced the observed discrepancies
+  # to the clip itself, not to genuine CFL instability -- but removing it
+  # without also fixing the domain (2026-07-13) made things dramatically
+  # worse, since the singularity was still physically present. Both issues
+  # are resolved together by rho_min>0: see
+  # concepts/coordinate-velocity-clipping in the project vault for the full
+  # history.
 
   # entire coefficient preceding dT/dr in heat transport equations
   full_chi_face_ion = (
