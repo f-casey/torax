@@ -459,15 +459,30 @@ def _calc_coeffs_full(
   # value (the standard treatment for a reaction term where only one of the
   # two factors is the variable being solved in THIS equation -- mirrors how
   # Qei's implicit_ii/ee terms use the OTHER temperature's current value).
-  # This is the ('n_n','n_n') source_mat entry below. Phase 2 will add the
-  # symmetric ('n_e','n_n') cross term to enable the live n_e source; for
-  # Phase 1 n_e's source stays exactly as externally configured (untouched).
+  # This is the ('n_n','n_n') source_mat entry below.
   source_mat_n_n_n_n = (
       -core_profiles.n_e.value
       * runtime_params.profile_conditions.R_iz
       * geo.vpr
   )
   source_n_n = jnp.zeros_like(geo.rho)
+
+  # n_e ionisation source -- Phase 3 (2026-07-14). Symmetric cross-coupling
+  # term completing the bilinear ionisation reaction n_e*R_iz*n_n: n_n's row
+  # (above) freezes n_e and is linear in n_n (its own diagonal); n_e's row
+  # mirrors this exact linearisation convention -- freeze n_e (the SAME
+  # frozen value used above, for a single self-consistent linearisation
+  # scheme) and be linear in n_n (the column variable) -- this is the
+  # ('n_e','n_n') off-diagonal entry below. Only meaningful once
+  # evolve_n_n=True AND evolve_density=True are both active (Phase 3); with
+  # evolve_density=False (Phase 1/2), n_e is not in evolving_names so this
+  # entry is never selected into source_mat_cell regardless of being defined
+  # here.
+  source_mat_n_e_n_n = (
+      core_profiles.n_e.value
+      * runtime_params.profile_conditions.R_iz
+      * geo.vpr
+  )
 
   # Pereverzev-Corrigan correction for heat and particle transport
   # (deals with stiff nonlinearity of transport coefficients)
@@ -662,6 +677,7 @@ def _calc_coeffs_full(
       ('T_e', 'T_i'): source_mat_ei,
       ('T_e', 'T_e'): source_mat_ee,
       ('n_e', 'n_e'): source_mat_nn,
+      ('n_e', 'n_n'): source_mat_n_e_n_n,
       ('n_n', 'n_n'): source_mat_n_n_n_n,
       ('psi', 'psi'): source_mat_psi,
   }
