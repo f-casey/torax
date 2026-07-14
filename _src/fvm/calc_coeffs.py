@@ -394,12 +394,26 @@ def _calc_coeffs_full(
   h_rho_face = 2.0 * psi_b * rho_hat_face / jnp.maximum(B_face_n_n, 1e-10)
 
   d_face_n_n = jnp.zeros_like(geo.rho_face)
-  # jnp.abs(g0_face): g0_face[0] is negative in this dipole equilibrium (area
-  # vector convention points into the coil, see the Robin BC fix in
-  # getters.py) -- n_n's advection must be uniformly outward everywhere,
-  # unlike n_e's K_n-switched pinch which genuinely changes sign by region.
+  # Geometric factor fix (2026-07-14): use geo.vpr_face (V_rho = dV/drho_hat),
+  # NOT geo.g0_face (<grad V>), matching the validated external
+  # evolve_neutral_pde reference's own flux formula exactly:
+  #   F = Vrho_arr * u * n_n   (u = v_th_n/h_rho)
+  # This is n_n's own PDE (writeup Eq 174): d(V_rho*n_n)/dt =
+  # -d/drho_hat(V_rho*u*n_n) - V_rho*n_e*R_iz*n_n. The original
+  # implementation (2026-07-09) copied n_e's QLDipole_nU advection pattern
+  # (full_v_face_el = geo.g0_face * v_face_el_total) without checking
+  # whether n_n's own equation uses the same geometric factor -- it doesn't.
+  # g0 (<grad V>, units m^2) and vpr (dV/drho_hat, units m^3) are physically
+  # different quantities that diverge across this geometry (vpr/g0 grows by
+  # ~4x from rho_min to rho_hat~1), producing a smoothly accumulating
+  # multiplicative error that was mistaken for a discretization/CFL problem
+  # through several rounds of investigation (see
+  # concepts/coordinate-velocity-clipping in the project vault for the full
+  # history). vpr_face is always positive (volume strictly increases with
+  # rho_hat), unlike g0_face which is negative in this dipole equilibrium --
+  # no jnp.abs() needed here.
   full_v_face_n_n = (
-      jnp.abs(geo.g0_face)
+      geo.vpr_face
       * runtime_params.profile_conditions.v_th_n
       / h_rho_face
   )
