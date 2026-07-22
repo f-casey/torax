@@ -255,8 +255,28 @@ def get_updated_electron_density(
         ),
     )
 
+    # Coordinate Jacobian (2026-07-22, Stage B0 fix). D_e_inner/v_e_inner read
+    # above are ALREADY the Jacobian-corrected coefficients (QLDipole_nU scales
+    # d_face_el by 1/(1-rho_min)^2 and v_face_el by 1/(1-rho_min) at its output),
+    # so D_eff = J^2*D_phys and V_full = J*V_phys here -- consistent with the
+    # interior FVM, no mixing. With these, the reconstructed left-face flux
+    # (A and V_full/dr0 terms, dr0 in MESH coordinate) equals TORAX's internal
+    # flux Phi_torax = J*Phi_physical. The sheath condition is on the PHYSICAL
+    # flux, Phi_physical = n_face*c_s, so balancing Phi_torax against the sheath
+    # requires the c_s term to carry one factor of J as well:
+    #   Phi_torax = J*Phi_physical = J*n_face*c_s  ->  c_s_eff = J*c_s.
+    # (The Peclet number pe above comes out physically correct automatically:
+    # pe = -0.5*dr0_mesh*V_full/D_eff = -0.5*dr0_mesh*V_phys/(J*D_phys), i.e. it
+    # uses the physical half-cell length dr0_mesh/J.) EXACT no-op at rho_min=0
+    # (J=1). NOTE ON GRADIENT-CONSTRAINT BCs: TORAX applies face_grad_constraint
+    # values in the MESH coordinate (CellVariable.face_centers = geo.rho_face_norm,
+    # [0,1]). Today's only grad constraint is n_n's outer zero-gradient (0 scales
+    # to 0, safe). Any FUTURE nonzero gradient constraint on a rho_min>0 domain
+    # must convert a physical dn/drho_hat to the mesh value via *(1-rho_min), i.e.
+    # mesh_constraint = physical_gradient/J. See restricted-domain-migration-checklist.
+    _jac_robin = 1.0 / (1.0 - profile_conditions_params.rho_min)
     A = 2.0 * D_eff / (dr0 * dr0)
-    B_sheath = c_s_val / dr0
+    B_sheath = c_s_val / dr0 * _jac_robin
     numerator   = A + V_full * (1.0 - 2.0 * alpha) / dr0
     denominator = A + 2.0 * V_full * (1.0 - alpha) / dr0 + B_sheath
     n_face_robin = value[0] * numerator / jnp.maximum(denominator, jnp.ones(()) * 1e-30)

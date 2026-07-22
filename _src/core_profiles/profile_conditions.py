@@ -78,6 +78,12 @@ class RuntimeParams:
   R_iz: array_typing.FloatScalar
   R_RECYCLE: array_typing.FloatScalar
   rho_min: array_typing.FloatScalar
+  # Stage B (2026-07-22): fixed prescribed particle source for n_e. S0 is the
+  # total integrated source (particles/s, = integral(vpr*S) drho_hat); n_ref
+  # sets the optical-depth shape exp(-tau), tau built from n_ref*R_iz*h_rho/
+  # v_th_n. Inert when S0=0 (default) -- source scales as S0 so no branch needed.
+  fixed_source_S0: array_typing.FloatScalar
+  fixed_source_n_ref: array_typing.FloatScalar
   current_profile_nu: float
   use_robin_bc: bool = dataclasses.field(metadata={'static': True})
   use_neumann_outer: bool = dataclasses.field(metadata={'static': True})
@@ -230,6 +236,14 @@ class ProfileConditions(torax_pydantic.BaseModelFrozen):
   # preserves prior behaviour (domain starting at the magnetic axis) for
   # configs that don't set this explicitly.
   rho_min: torax_pydantic.NonNegativeTimeVaryingScalar = (
+      torax_pydantic.ValidatedDefault(0.0)
+  )
+  # Stage B fixed prescribed n_e particle source (2026-07-22). Default 0.0 =>
+  # inert (source scales linearly with S0), preserving all prior configs.
+  fixed_source_S0: torax_pydantic.NonNegativeTimeVaryingScalar = (
+      torax_pydantic.ValidatedDefault(0.0)
+  )
+  fixed_source_n_ref: torax_pydantic.NonNegativeTimeVaryingScalar = (
       torax_pydantic.ValidatedDefault(0.0)
   )
   current_profile_nu: float = 1.0

@@ -18,6 +18,7 @@ import functools
 import jax
 import jax.numpy as jnp
 from torax._src import constants
+from torax._src import math_utils
 from torax._src import physics_models as physics_models_lib
 from torax._src import state
 from torax._src.config import runtime_params as runtime_params_lib
@@ -422,10 +423,20 @@ def _calc_coeffs_full(
   # history). vpr_face is always positive (volume strictly increases with
   # rho_hat), unlike g0_face which is negative in this dipole equilibrium --
   # no jnp.abs() needed here.
+  # Coordinate Jacobian (2026-07-22, Stage B0 fix): the FVM assembles this
+  # advection divergence in the internal [0,1] MESH coordinate, but the n_n
+  # equation (Eq 174) is in the physical rho_hat = rho_min+(1-rho_min)*rho_mesh.
+  # d/drho_hat = (1/(1-rho_min)) d/drho_mesh, so the mesh-coordinate advection
+  # coefficient carries one factor of 1/(1-rho_min). n_n diffusion is exactly 0
+  # (D=0, pure advection) so no J^2 term is needed. EXACT no-op at rho_min=0.
+  # Applied at coefficient construction; n_n is not Pereverzev-augmented. See
+  # Stage B0 in goal-1-2-6 and concepts/restricted-domain-migration-checklist.
+  _jac_n_n = 1.0 / (1.0 - rho_min)
   full_v_face_n_n = (
       geo.vpr_face
       * runtime_params.profile_conditions.v_th_n
       / h_rho_face
+      * _jac_n_n
   )
   # No velocity clip: with the domain starting at rho_min>0, there is no
   # coordinate singularity for a clip to regularize, and TORAX's solver
@@ -463,6 +474,32 @@ def _calc_coeffs_full(
 
   # density source vector based both on original and updated core profiles
   source_n_e = merged_source_profiles.total_sources('n_e', geo)
+
+  # Stage B fixed prescribed particle source (2026-07-22). A truly n_e-INDEPENDENT
+  # inner-wall-peaked ionization source, the goal-1.2.3 "fixed exponential"
+  # (Step-1) form, injected when profile_conditions.fixed_source_S0 > 0. Shape is
+  # the neutral optical-depth attenuation exp(-tau) with tau built natively in
+  # PHYSICAL rho_hat from the same h_rho used by the n_n advection above (neutrals
+  # born at rho_hat=rho_min stream outward, ionizing as they penetrate). Amplitude
+  # normalized via TORAX's own volume_integration over the RESTRICTED geometry, so
+  # the total integrated source integral(vpr*S) == fixed_source_S0 natively on
+  # [rho_min,1] (NOT truncated/renormalized from a [0,1] build). Scales linearly
+  # with S0 => exactly inert (0) at the default S0=0, no branch needed. n_ref sets
+  # the penetration depth (tau ~ n_ref*R_iz*h_rho/v_th_n). See Stage B in goal-1-2-6.
+  _fs_S0 = runtime_params.profile_conditions.fixed_source_S0
+  _fs_nref = runtime_params.profile_conditions.fixed_source_n_ref
+  _B_cell = jnp.sqrt(jnp.maximum(geo.gm5, 1e-10))
+  _h_rho_cell = 2.0 * psi_b * rho_hat_cell / jnp.maximum(_B_cell, 1e-10)
+  _kappa_cell = _fs_nref * runtime_params.profile_conditions.R_iz * _h_rho_cell / (
+      runtime_params.profile_conditions.v_th_n
+  )
+  # cumulative optical depth from the inner wall (physical rho_hat spacing),
+  # shifted so tau=0 at the first cell (inner wall reference).
+  _drho_hat = (1.0 - rho_min) * (geo.rho_norm[1] - geo.rho_norm[0])
+  _tau_cell = (jnp.cumsum(_kappa_cell) - _kappa_cell[0]) * _drho_hat
+  _fs_shape = jnp.exp(-_tau_cell)
+  _fs_norm = jnp.maximum(math_utils.volume_integration(_fs_shape, geo), 1e-300)
+  source_n_e = source_n_e + _fs_S0 * _fs_shape / _fs_norm
 
   # Neutral density (n_n) ionisation sink -- Phase 1 (2026-07-09).
   # Bilinear term n_e*R_iz*n_n, linearised by freezing n_e at its current
