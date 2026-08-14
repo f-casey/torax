@@ -34,6 +34,20 @@ from torax._src.sources import source_profiles as source_profiles_lib
 import typing_extensions
 
 
+# Voronov (1997) electron-impact ionisation rate coefficient, atomic
+# hydrogen (Table 2: dE=13.6eV, P=0, A=2.91e-8 cm^3/s, X=0.232, K=0.39).
+# R_iz(T_e) = A*(1+P*sqrt(U))/(X+U)*U^K*exp(-U), U=dE/T_e[eV]. Pure
+# elementwise jnp -- no data-dependent control flow, traces cleanly.
+# Reproduces this project's constant default (3.17e-14 m^3/s,
+# profile_conditions.py's R_iz) at T_e=100eV to the given precision,
+# confirmed by direct calculation before wiring in (2026-08-07, Stage 0).
+def _voronov_R_iz_H(T_e_eV: jax.Array) -> jax.Array:
+  dE, A, X, K = 13.6, 2.91e-8, 0.232, 0.39  # A in cm^3/s
+  U = dE / jnp.maximum(T_e_eV, 1e-3)
+  R_iz_cm3 = A / (X + U) * U**K * jnp.exp(-U)
+  return R_iz_cm3 * 1e-6  # cm^3/s -> m^3/s
+
+
 # pylint: disable=invalid-name
 class CoeffsCallback:
   """Calculates Block1DCoeffs for a state."""
@@ -486,11 +500,23 @@ def _calc_coeffs_full(
   # [rho_min,1] (NOT truncated/renormalized from a [0,1] build). Scales linearly
   # with S0 => exactly inert (0) at the default S0=0, no branch needed. n_ref sets
   # the penetration depth (tau ~ n_ref*R_iz*h_rho/v_th_n). See Stage B in goal-1-2-6.
+  # Stage 0 (2026-08-07, energy-equation-scoping Task 2): R_iz(T_e), computed
+  # once and reused at all three call sites below (this one, and the n_n/n_e
+  # ionisation-reaction terms further down). use_local_R_iz=False (default)
+  # reproduces runtime_params.profile_conditions.R_iz exactly -- an exact
+  # no-op regardless of core_profiles.T_e's value, preserving every existing
+  # script's behaviour (T_e was previously an unused placeholder everywhere).
+  _R_iz_cell = jnp.where(
+      runtime_params.profile_conditions.use_local_R_iz,
+      # core_profiles.T_e.value is in keV (state.py); Voronov's fit expects eV.
+      _voronov_R_iz_H(core_profiles.T_e.value * 1e3),
+      runtime_params.profile_conditions.R_iz,
+  )
   _fs_S0 = runtime_params.profile_conditions.fixed_source_S0
   _fs_nref = runtime_params.profile_conditions.fixed_source_n_ref
   _B_cell = jnp.sqrt(jnp.maximum(geo.gm5, 1e-10))
   _h_rho_cell = 2.0 * psi_b * rho_hat_cell / jnp.maximum(_B_cell, 1e-10)
-  _kappa_cell = _fs_nref * runtime_params.profile_conditions.R_iz * _h_rho_cell / (
+  _kappa_cell = _fs_nref * _R_iz_cell * _h_rho_cell / (
       runtime_params.profile_conditions.v_th_n
   )
   # cumulative optical depth from the inner wall (physical rho_hat spacing),
@@ -514,7 +540,7 @@ def _calc_coeffs_full(
   )
   source_mat_n_n_n_n = (
       -core_profiles.n_e.value
-      * runtime_params.profile_conditions.R_iz
+      * _R_iz_cell
       * geo.vpr
       * _nn_nn_scaling_ratio
   )
@@ -548,7 +574,7 @@ def _calc_coeffs_full(
   )
   source_mat_n_e_n_n = (
       core_profiles.n_e.value
-      * runtime_params.profile_conditions.R_iz
+      * _R_iz_cell
       * geo.vpr
       * _ne_nn_scaling_ratio
   )
@@ -580,6 +606,16 @@ def _calc_coeffs_full(
   full_chi_face_el += chi_face_per_el
   full_d_face_el += d_face_per_el
   full_v_face_el += v_face_per_el
+
+  # Track B Step 2 (2026-08-11): physical electron heat convection from the
+  # entropy closure (QLDipole_nU's v_heat_face_el, when use_entropy_chi_e is
+  # set), added the SAME way Pereverzev/Phi_b_dot already add their own
+  # contributions to v_heat_face_el below -- turbulent_transport.v_heat_face_el
+  # is None for every transport model that doesn't populate it (structural,
+  # not a traced value, so this check is trace-time-static and safe under
+  # jit), an exact no-op for everything except this project's own model.
+  if turbulent_transport.v_heat_face_el is not None:
+    v_heat_face_el += turbulent_transport.v_heat_face_el
 
   # Add Phi_b_dot terms to heat transport convection
   v_heat_face_ion += (

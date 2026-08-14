@@ -115,6 +115,16 @@ class TurbulentTransport:
   d_face_el_tem: jax.Array | None = None
   v_face_el_itg: jax.Array | None = None
   v_face_el_tem: jax.Array | None = None
+  # Track B Step 2 (2026-08-11, dipole project): physical electron HEAT
+  # convection, on the face grid -- distinct from chi_face_el (diffusive).
+  # None (default) is an exact no-op for every existing transport model and
+  # every existing call site: calc_coeffs.py only adds this into v_heat_face_el
+  # when it is not None (see `if turbulent_transport.v_heat_face_el is not
+  # None:` there), so omitting it/leaving it None reproduces prior behaviour
+  # bit-identically. Populated by QLDipole_nU's entropy-closure convective
+  # term when use_entropy_chi_e=True; every other transport model leaves this
+  # None and is completely unaffected by this field's existence.
+  v_heat_face_el: jax.Array | None = None
 
 
 @dataclasses.dataclass(frozen=True, eq=False)

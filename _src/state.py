@@ -245,6 +245,13 @@ class CoreTransport:
   D_neo_e: jax.Array | None = None
   V_neo_e: jax.Array | None = None
   V_neo_ware_e: jax.Array | None = None
+  # Track B Step 2 (2026-08-11, dipole project): pass-through of
+  # TurbulentTransport.v_heat_face_el, so transport_coefficients_builder.py's
+  # `CoreTransport(**dataclasses.asdict(turbulent_transport), ...)` splat
+  # doesn't error on the new field. None (default) for every transport model
+  # that doesn't populate it -- exact no-op, mirrors TurbulentTransport's own
+  # field precisely.
+  v_heat_face_el: jax.Array | None = None
 
   def __post_init__(self):
     # Use the array size of chi_face_el as a template.
