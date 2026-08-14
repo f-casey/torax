@@ -289,6 +289,14 @@ def provide_core_profiles_t_plus_dt(
       geo_t_plus_dt,
       only_boundary_condition=numerics.evolve_electron_heat,
       original_T_e_value=core_profiles_t.T_e,
+      transport_coeffs=core_transport,
+      # n_e not yet updated at this point in the call order (T_e is
+      # computed before n_e below) -- use the PREVIOUS timestep's n_e[0] as
+      # the frozen reference for the sheath-heat BC's c_s/B_sheath_heat
+      # terms, the same "evaluate coefficients at the current/last-iterate
+      # state" convention already used throughout this project (e.g. the
+      # n_e*R_iz*n_n bilinear term's frozen n_e factor).
+      n_e=core_profiles_t.n_e,
   )
   n_e = getters.get_updated_electron_density(
       profile_conditions_t_plus_dt,
@@ -296,6 +304,7 @@ def provide_core_profiles_t_plus_dt(
       transport_coeffs=core_transport,
       only_boundary_condition=numerics.evolve_density,
       original_n_e_value=core_profiles_t.n_e,
+      T_e=T_e,
   )
   # n_e passed only when evolve_n_n is True -- mirrors the transport_coeffs
   # guard above: the argument is only meaningful (recycling BC) when the
@@ -307,6 +316,7 @@ def provide_core_profiles_t_plus_dt(
       only_boundary_condition=numerics.evolve_n_n,
       original_n_n_value=core_profiles_t.n_n,
       n_e=core_profiles_t.n_e if numerics.evolve_n_n else None,
+      T_e=T_e if numerics.evolve_n_n else None,
   )
   toroidal_angular_velocity = getters.get_updated_toroidal_angular_velocity(
       profile_conditions_t_plus_dt, geo_t_plus_dt

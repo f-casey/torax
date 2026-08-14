@@ -92,6 +92,8 @@ def get_updated_electron_temperature(
     geo: geometry.Geometry,
     only_boundary_condition: bool = False,
     original_T_e_value: cell_variable.CellVariable | None = None,
+    transport_coeffs: state.CoreTransport | None = None,
+    n_e: cell_variable.CellVariable | None = None,
 ) -> cell_variable.CellVariable:
   """Gets initial and/or prescribed electron temperature profiles."""
   if only_boundary_condition:
@@ -104,11 +106,144 @@ def get_updated_electron_temperature(
   else:
     value = profile_conditions_params.T_e
 
+  # Track B Step 2 amendment, Task 3 (2026-08-11): sheath-like heat-loss
+  # inner BC, q = gamma_sheath*n*c_s*T_e -- the thermal counterpart of the
+  # inner particle Robin/grazing-recycling BC (this file's
+  # get_updated_electron_density block), same Robin/mixed-BC derivation
+  # pattern: solve for the equivalent Dirichlet T_e_face that reproduces the
+  # heat-loss condition through the SAME diffusion+convection FVM algebra.
+  #   q_left = 2*chi_eff*(T_face-T[0])/dr0 + v_heat*(2a-1)*T[0]
+  #            + 2*v_heat*(1-a)*T_face  =  -gamma_sheath*n[0]*c_s(T[0])*T_face
+  # c_s uses the INTERIOR cell's T[0] (known/frozen), not T_face itself,
+  # keeping the equation LINEAR in T_face -- the same "freeze one factor"
+  # linearisation already used for the n_e*R_iz*n_n bilinear term elsewhere
+  # in this codebase. gamma_sheath=0 (default via ValidatedDefault) makes
+  # the extra term vanish exactly, reproducing use_zero_heat_flux_inner's
+  # pure-Neumann-equivalent result (mirrors the outer sheath BC's own
+  # tiny-value-is-Neumann regression pattern, Task 13).
+  #
+  # UNIT/MAGNITUDE CAVEAT (2026-08-11): chi_eff and v_heat here come from
+  # QLDipole_nU's entropy-closure output, whose overall scale is set by
+  # D_tilde_s -- an EMPIRICALLY calibrated, uncalibrated-in-any-source free
+  # parameter (see goal-1-2-6 Task 17/18). gamma_sheath's OWN absolute
+  # effect on T_e therefore inherits that same scale uncertainty; only the
+  # DIRECTION (does raising gamma_sheath cool the wall) and the REGRESSION
+  # gate (gamma_sheath=0 is an exact no-op) are treated as reliable here.
+  _sheath_heat_active = (
+      profile_conditions_params.use_sheath_heat_inner
+      and transport_coeffs is not None
+      and n_e is not None
+  )
+  if _sheath_heat_active:
+    chi_e_inner = transport_coeffs.chi_face_el[0]
+    v_heat_inner = (
+        transport_coeffs.v_heat_face_el[0]
+        if transport_coeffs.v_heat_face_el is not None
+        else jnp.zeros(())
+    )
+    dr0 = geo.rho_face_norm[1] - geo.rho_face_norm[0]
+    n_e0 = n_e.value[0]
+    _keV_to_J = 1e3 * 1.602176634e-19
+    # BUG FIX (2026-08-12): calc_coeffs.py's OWN interior convention for the
+    # heat equation is full_chi_face_el = g1_over_vpr_face*n_e_face*keV_to_J
+    # *chi_face_el_total -- an EXTRA n_e*keV_to_J factor the PARTICLE
+    # equation's D_eff does NOT carry (full_d_face_el = g1_over_vpr_face*
+    # d_face_el_total only). The original version of this block mirrored the
+    # particle equation's D_eff construction literally and omitted this
+    # factor, making chi_eff (and hence A_h) ~871x too small at the tested
+    # wall conditions -- this, combined with bug #2 below, is what caused
+    # B_sheath_heat to dominate A_h by 10+ orders of magnitude at EVERY
+    # gamma_sheath tested (0.01 through 7), instead of scaling gradually.
+    # v_heat_face_el is NOT given the analogous treatment: calc_coeffs.py's
+    # own full_v_face_el (particle) and v_heat_face_el (heat, Pereverzev/
+    # Phi_b_dot contributions) both lack an n_e*keV_to_J factor too --
+    # confirmed directly from calc_coeffs.py -- so only the diffusive term
+    # needs this fix, not the convective one.
+    chi_eff = geo.g1_over_vpr_face[0] * n_e0 * _keV_to_J * chi_e_inner
+    v_heat_full = v_heat_inner  # NOT g0_face-multiplied, see calc_coeffs.py
+
+    safe_chi = jnp.maximum(chi_eff, jnp.ones(()) * 1e-30)
+    pe_h = -0.5 * dr0 * v_heat_full / safe_chi
+    pe_eps = jnp.array(1e-3)
+    pe_hs = jnp.where(jnp.abs(pe_h) < pe_eps, pe_eps, pe_h)
+    alpha_h = jnp.where(
+        jnp.abs(pe_h) < pe_eps,
+        jnp.array(0.5),
+        jnp.where(
+            pe_h > 10.0, (pe_hs - 1.0) / pe_hs,
+            jnp.where(
+                pe_h > pe_eps,
+                ((pe_hs - 1.0) + (1.0 - pe_hs / 10.0) ** 5) / pe_hs,
+                jnp.where(
+                    pe_h >= -10.0,
+                    ((1.0 + pe_hs / 10.0) ** 5 - 1.0) / pe_hs,
+                    -1.0 / pe_hs,
+                ),
+            ),
+        ),
+    )
+
+    T_e0_keV = value[0]
+    T_e0_eV = T_e0_keV * 1e3
+    m_i_hydrogen = 1.67e-27
+    c_s_T0 = jnp.sqrt(1.602e-19 * T_e0_eV / m_i_hydrogen)
+    _jac_heat = 1.0 / (1.0 - profile_conditions_params.rho_min)
+    A_h = 2.0 * chi_eff / (dr0 * dr0)
+    # BUG FIX (2026-08-12): q_sheath[Joules-flux] = gamma_sheath*n_e0*c_s(T0)
+    # *T_face[Joules], and T_face[Joules] = T_face[keV]*keV_to_J -- so the
+    # coefficient multiplying the UNKNOWN T_face[keV] must carry keV_to_J
+    # (the FIXED unit-conversion CONSTANT), not T_e0_keV (the INTERIOR
+    # CELL's temperature, a state-dependent VARIABLE). The original version
+    # used T_e0_keV here -- a genuine bug, not a modelling choice: it
+    # confused "convert keV to Joules" with "multiply by the wall
+    # temperature again". T_e0_keV~1e-4 (0.1eV) happens to still be a small
+    # number, which is why the resulting saturation wasn't immediately
+    # obvious as wrong, but it is ~6e11x larger than the correct keV_to_J
+    # ~1.6e-16, and combined with A_h's own bug (above), together explain
+    # why B_sheath_heat dominated A_h by 10+ orders of magnitude at every
+    # gamma_sheath tested instead of scaling gradually with it.
+    B_sheath_heat = (
+        profile_conditions_params.gamma_sheath * n_e0 * c_s_T0 * _keV_to_J
+        / dr0 * _jac_heat
+    )
+    numerator_h = A_h + v_heat_full * (1.0 - 2.0 * alpha_h) / dr0
+    denominator_h = (
+        A_h + 2.0 * v_heat_full * (1.0 - alpha_h) / dr0 + B_sheath_heat
+    )
+    T_e_face_robin = T_e0_keV * numerator_h / jnp.maximum(
+        denominator_h, jnp.ones(()) * 1e-30
+    )
+    T_e_face_robin = jnp.clip(
+        T_e_face_robin,
+        profile_conditions_params.T_e_floor_keV,
+        T_e0_keV,
+    )
+
+  # Track B Step 2 (2026-08-11): zero-gradient (zero heat-flux) inner BC,
+  # an alternative to the Dirichlet T_e_left_bc used everywhere so far.
+  # use_zero_heat_flux_inner is JAX_STATIC (a concrete Python bool, not a
+  # traced value), so a plain Python conditional is correct here -- these are
+  # STRUCTURAL choices (None vs an array), not a numeric jnp.where select.
+  # Default False is an exact no-op -- same Dirichlet
+  # left_face_constraint/left_face_grad_constraint=None pair as before. True
+  # swaps to left_face_grad_constraint=0.0, left_face_constraint=None
+  # (natural zero-flux, mirrors n_n's own outer zero-gradient BC pattern).
+  # use_sheath_heat_inner (when active) takes priority over both.
+  if _sheath_heat_active:
+    _left_face_grad_constraint = None
+    _left_face_constraint = T_e_face_robin
+  elif profile_conditions_params.use_zero_heat_flux_inner:
+    _left_face_grad_constraint = jnp.zeros(())
+    _left_face_constraint = None
+  else:
+    _left_face_grad_constraint = None
+    _left_face_constraint = profile_conditions_params.T_e_left_bc
+
   T_e = cell_variable.CellVariable(
       value=value,
       face_centers=geo.rho_face_norm,
-      left_face_grad_constraint=None,
-      left_face_constraint=profile_conditions_params.T_e_left_bc,
+      left_face_grad_constraint=_left_face_grad_constraint,
+      left_face_constraint=_left_face_constraint,
       right_face_grad_constraint=None,
       right_face_constraint=profile_conditions_params.T_e_right_bc,
   )
@@ -121,6 +256,7 @@ def get_updated_electron_density(
     transport_coeffs: state.CoreTransport | None = None,
     only_boundary_condition: bool = False,
     original_n_e_value: cell_variable.CellVariable | None = None,
+    T_e: cell_variable.CellVariable | None = None,
 ) -> cell_variable.CellVariable:
   """Gets initial and/or prescribed electron density profiles."""
   # Greenwald density in m^-3.
@@ -228,7 +364,32 @@ def get_updated_electron_density(
     #   the QL dipole analytical target.
     D_e_inner = transport_coeffs.d_face_el[0]
     v_e_inner = transport_coeffs.v_face_el[0]
-    c_s_val = profile_conditions_params.n_e_robin_bc_c_s
+    # Inner grazing-recycling BC (2026-08-06, Track A, Task 2 candidate (a)):
+    # SAME Robin/mixed-BC algebra, sign of the coefficient flipped -- a net
+    # INFLUX proportional to n_face (ion grazing-incidence recycling off the
+    # magnet, "opposite of a sheath") rather than the normal outflux. Reuses
+    # 100% of the existing B_sheath/numerator/denominator algebra below;
+    # only the sign of c_s_val changes. use_graze_recycling=False (default)
+    # or n_e_graze_recycling_c_s=0 is an exact no-op.
+    #
+    # Stage 0 (2026-08-07, energy-equation-scoping Task 2): the sheath-branch
+    # c_s can now be computed from the LOCAL T_e at the inner face instead of
+    # the config-supplied n_e_robin_bc_c_s -- use_local_robin_c_s=False
+    # (default) is an exact no-op, n_e_robin_bc_c_s keeps its existing role
+    # (including the near-zero "zeroflux" convention used throughout Track
+    # A) for every script that doesn't set this flag.
+    # T_e.value is in keV (state.py); c_s formula expects eV, hence *1e3.
+    _T_e_local_eV = (T_e.value[0] * 1e3) if T_e is not None else 100.0
+    _c_s_local = jnp.sqrt(1.602e-19 * _T_e_local_eV / 1.67e-27)
+    c_s_val = jnp.where(
+        profile_conditions_params.use_graze_recycling,
+        -profile_conditions_params.n_e_graze_recycling_c_s,
+        jnp.where(
+            profile_conditions_params.use_local_robin_c_s,
+            _c_s_local,
+            profile_conditions_params.n_e_robin_bc_c_s,
+        ),
+    )
     dr0 = geo.rho_face_norm[1] - geo.rho_face_norm[0]
     D_eff = geo.g1_over_vpr_face[0] * D_e_inner        # m³/s
     V_full = geo.g0_face[0] * v_e_inner                 # m³/s (full_v_face_el[0])
@@ -280,22 +441,48 @@ def get_updated_electron_density(
     numerator   = A + V_full * (1.0 - 2.0 * alpha) / dr0
     denominator = A + 2.0 * V_full * (1.0 - alpha) / dr0 + B_sheath
     n_face_robin = value[0] * numerator / jnp.maximum(denominator, jnp.ones(()) * 1e-30)
-    # Clip to physical range to guard against transient blow-up when D_eff ≈ 0 at startup.
-    n_face_robin = jnp.clip(n_face_robin, jnp.zeros(()), value[0])
+    # Clip to physical range to guard against transient blow-up when D_eff ≈ 0 at
+    # startup. Sheath/outflux (use_graze_recycling=False): face density can only
+    # be depleted relative to the interior, so clip to [0, value[0]] -- this is
+    # the original guard. Grazing-recycling (use_graze_recycling=True): an INFLUX
+    # BC, so the physically correct direction is n_face >= value[0] (recycling
+    # enriches the face above the interior); clipping to value[0] here would
+    # silently zero out the entire recycling effect (bug found 2026-08-07 --
+    # every nonzero recycling strength was being clamped back to the zero-flux
+    # face value). Use [value[0], large-finite] instead, the finite bound still
+    # catching the same D_eff≈0 startup blow-up the sheath branch guards against.
+    n_face_robin = jnp.where(
+        profile_conditions_params.use_graze_recycling,
+        jnp.clip(n_face_robin, value[0], jnp.ones(()) * 1e30),
+        jnp.clip(n_face_robin, jnp.zeros(()), value[0]),
+    )
 
     left_face_bc = n_face_robin
   else:
     left_face_bc = n_e_left_bc
 
-  if profile_conditions_params.use_neumann_outer and transport_coeffs is not None:
-    # Zero-total-flux outer BC: Γ_diff + Γ_conv = 0 at ρ=1.
-    # Right-face analog of the Robin inner BC — solve for n_face_outer s.t. no
-    # net particle flux (diffusive + convective) crosses the outer face.
-    #   Γ_right = 2D(n_face-n[-1])/drN + V[(2α-1)n[-1] + 2(1-α)n_face] = 0
-    #   → n_face = n[-1] × (A + V(1-2α)/drN) / (A + 2V(1-α)/drN)
-    # where A = 2D/drN², pe = +0.5·drN·V/D (positive sign for right face:
-    # outward V→Pe>0→interior is upwind). When V·drN/(2D) > 1 the formula gives
-    # n_face < 0 (convection too strong to balance); clips to 0 (absorbing-wall limit).
+  if (
+      profile_conditions_params.use_neumann_outer
+      or profile_conditions_params.use_sheath_outer
+  ) and transport_coeffs is not None:
+    # Zero-total-flux outer BC: Γ_diff + Γ_conv = 0 at ρ=1 (use_neumann_outer),
+    # OR the outer SHEATH BC (2026-08-06, group-review directive): Γ_diff +
+    # Γ_conv = -n_face*c_s_outer at ρ=1 (use_sheath_outer) -- the LCFS as a
+    # parallel-loss channel for levitated operation, mirroring the inner
+    # Robin BC's B_sheath term exactly (see this file's inner-BC block above).
+    # Right-face analog of the Robin inner BC — solve for n_face_outer s.t.
+    # net particle flux (diffusive + convective) crosses the outer face at
+    # the (possibly zero) sheath rate.
+    #   Γ_right = 2D(n_face-n[-1])/drN + V[(2α-1)n[-1] + 2(1-α)n_face]
+    #           = -n_face * c_s_outer
+    #   → n_face = n[-1] × (A + V(1-2α)/drN) / (A + 2V(1-α)/drN + B_sheath_outer)
+    # where A = 2D/drN², B_sheath_outer = c_s_outer/drN * J (SAME Jacobian
+    # convention as the inner Robin BC's B_sheath, J=1/(1-rho_min)), pe =
+    # +0.5·drN·V/D (positive sign for right face: outward V→Pe>0→interior is
+    # upwind). B_sheath_outer=0 (use_sheath_outer=False, or c_s_outer=0) is an
+    # EXACT no-op, reproducing the pure-Neumann formula identically. When
+    # V·drN/(2D) > 1 the formula gives n_face < 0 (convection too strong to
+    # balance); clips to 0 (absorbing-wall limit).
     D_e_outer = transport_coeffs.d_face_el[-1]
     v_e_outer = transport_coeffs.v_face_el[-1]
     drN = geo.rho_face_norm[-1] - geo.rho_face_norm[-2]
@@ -324,8 +511,12 @@ def get_updated_electron_density(
     )
 
     A_r = 2.0 * D_eff_r / (drN * drN)
+    _jac_sheath_outer = 1.0 / (1.0 - profile_conditions_params.rho_min)
+    B_sheath_outer = (
+        profile_conditions_params.n_e_sheath_outer_c_s / drN * _jac_sheath_outer
+    )
     numerator_r   = A_r + V_full_r * (1.0 - 2.0 * alpha_r) / drN
-    denominator_r = A_r + 2.0 * V_full_r * (1.0 - alpha_r) / drN
+    denominator_r = A_r + 2.0 * V_full_r * (1.0 - alpha_r) / drN + B_sheath_outer
     n_face_outer = value[-1] * numerator_r / jnp.maximum(denominator_r, jnp.ones(()) * 1e-30)
     n_face_outer = jnp.clip(n_face_outer, jnp.zeros(()), value[-1])
     right_face_bc = n_face_outer
@@ -349,6 +540,7 @@ def get_updated_neutral_density(
     only_boundary_condition: bool = False,
     original_n_n_value: cell_variable.CellVariable | None = None,
     n_e: cell_variable.CellVariable | None = None,
+    T_e: cell_variable.CellVariable | None = None,
 ) -> cell_variable.CellVariable:
   """Gets initial and/or prescribed neutral density profiles.
 
@@ -359,15 +551,18 @@ def get_updated_neutral_density(
 
   Inner BC is the recycling condition n_n(0) = R_RECYCLE * n_e(0) * c_s /
   v_th_n, recomputed from the CURRENT n_e each call (mirrors what the
-  external operator-split loop did, now inside TORAX). c_s uses a
-  placeholder T_e=100eV and hydrogen mass -- matching the notebook's own
-  standalone c_s convention exactly, NOT core_profiles.A_i (which reflects
-  the configured main_ion='D', deuterium, ~2x hydrogen mass) -- consistency
+  external operator-split loop did, now inside TORAX). c_s uses the LOCAL
+  T_e at cell 0 (Stage 0, 2026-08-07 -- previously a hardcoded 100eV
+  placeholder) and hydrogen mass -- matching the notebook's own standalone
+  c_s convention exactly, NOT core_profiles.A_i (which reflects the
+  configured main_ion='D', deuterium, ~2x hydrogen mass) -- consistency
   with the notebook's external validation (Run C_RS, evolve_neutral_pde)
   matters more here than using the "real" configured ion species, since
   that's what we're being validated against. If `n_e` is not provided
   (e.g. during initialization, before any n_e state exists yet), falls back
-  to the plain n_n_left_bc Dirichlet default (1e12).
+  to the plain n_n_left_bc Dirichlet default (1e12). If `T_e` is not
+  provided (e.g. an older caller), falls back to the previous 100eV
+  placeholder.
 
   Outer BC is zero-gradient (outflow): no face-value constraint, matching
   the natural upwind exit for pure advection (n_n has D=0, per Jerome).
@@ -383,9 +578,17 @@ def get_updated_neutral_density(
     value = jnp.full_like(geo.rho, 1e12)
 
   if n_e is not None:
-    T_e_placeholder_eV = 100.0
+    # Stage 0 (2026-08-07, energy-equation-scoping Task 2): use the actual
+    # local T_e at cell 0 (matching n_e_inner's own indexing) instead of a
+    # hardcoded placeholder. No override/backward-compat gate needed here --
+    # unlike n_e_robin_bc_c_s, this was never a user-configurable value, and
+    # n_n's own BC value doesn't feed back into n_e's evolution when
+    # evolve_n_n=False (every currently-existing config), so this change
+    # carries no regression risk regardless of T_e's configured value.
+    # T_e.value is in keV (state.py); c_s formula expects eV, hence *1e3.
     m_i_hydrogen = 1.67e-27
-    c_s = jnp.sqrt(1.602e-19 * T_e_placeholder_eV / m_i_hydrogen)
+    T_e_local_eV = (T_e.value[0] * 1e3) if T_e is not None else 100.0
+    c_s = jnp.sqrt(1.602e-19 * T_e_local_eV / m_i_hydrogen)
     n_e_inner = n_e.value[0]
     left_face_bc = (
         profile_conditions_params.R_RECYCLE

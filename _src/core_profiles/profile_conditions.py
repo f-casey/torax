@@ -73,6 +73,33 @@ class RuntimeParams:
   n_e_right_bc: array_typing.FloatScalar
   n_e_right_bc_is_fGW: bool
   n_e_robin_bc_c_s: array_typing.FloatScalar
+  # Outer sheath BC (2026-08-06, group-review directive): Gamma_out =
+  # n(1)*c_s(T_e) at the LCFS, mirroring the inner Robin machinery above.
+  # 0.0 (default, via ValidatedDefault fallback below) is an exact no-op --
+  # the use_neumann_outer formula's denominator gets +0, reproducing the
+  # existing zero-flux behaviour identically.
+  n_e_sheath_outer_c_s: array_typing.FloatScalar
+  # Inner grazing-recycling BC (2026-08-06, Track A): same Robin/mixed-BC
+  # algebra as n_e_robin_bc_c_s, but the coefficient enters with a FLIPPED
+  # SIGN (see getters.py) -- a net INFLUX proportional to n_face rather than
+  # an outflux. Kept as a separate PositiveTimeVaryingScalar (a magnitude,
+  # sign applied downstream) rather than loosening n_e_robin_bc_c_s's own
+  # positivity constraint. 0.0 default is an exact no-op.
+  n_e_graze_recycling_c_s: array_typing.FloatScalar
+  # Track B Step 2 amendment, Task 3 (2026-08-11): sheath-like heat-loss
+  # inner BC, q = gamma_sheath*n*c_s*T_e -- the thermal counterpart of the
+  # particle grazing-recycling BC, testing the group's "heat flux out at the
+  # inner boundary via grazing incidence" directive. gamma_sheath~7 is a
+  # standard order-of-magnitude sheath heat-transmission coefficient
+  # (dimensionless). 0.0 default is an exact no-op (see getters.py).
+  gamma_sheath: array_typing.FloatScalar
+  # Track B Step 2 amendment, Check 2 (2026-08-11): floor on the sheath-heat
+  # BC's face value, testing whether the entropy closure's chi_e~T_e
+  # feedback runaway (crashing T_e to sub-eV, outside the closure's derived
+  # regime) is what produces the pressure-relocation finding, or whether it
+  # survives a physically bounded wall temperature. 0.0 default is an exact
+  # no-op (same [0, T_e0] clip as before).
+  T_e_floor_keV: array_typing.FloatScalar
   n_n_left_bc: array_typing.FloatScalar
   v_th_n: array_typing.FloatScalar
   R_iz: array_typing.FloatScalar
@@ -87,6 +114,28 @@ class RuntimeParams:
   current_profile_nu: float
   use_robin_bc: bool = dataclasses.field(metadata={'static': True})
   use_neumann_outer: bool = dataclasses.field(metadata={'static': True})
+  use_sheath_outer: bool = dataclasses.field(metadata={'static': True})
+  use_graze_recycling: bool = dataclasses.field(metadata={'static': True})
+  # Stage 0 (2026-08-07, energy-equation-scoping Task 2): both default False,
+  # an exact no-op preserving every existing script's behaviour regardless of
+  # what T_e happens to be configured to (previously always an unused
+  # placeholder). When True, the corresponding quantity is computed from
+  # core_profiles.T_e instead of the config-supplied constant -- R_iz via the
+  # Voronov fit (calc_coeffs.py), the Robin-BC sheath c_s via sqrt(e*T_e/m_i)
+  # (getters.py). n_e_robin_bc_c_s/R_iz remain valid explicit overrides in
+  # either case; these flags only change what a NEW run can opt into.
+  use_local_R_iz: bool = dataclasses.field(metadata={'static': True})
+  use_local_robin_c_s: bool = dataclasses.field(metadata={'static': True})
+  # Track B Step 2 (2026-08-11): zero-gradient (zero heat-flux) inner BC for
+  # T_e, an alternative to the Dirichlet T_e_left_bc used everywhere so far.
+  # Default False is an exact no-op (T_e_left_bc keeps its existing role).
+  use_zero_heat_flux_inner: bool = dataclasses.field(metadata={'static': True})
+  # Track B Step 2 amendment, Task 3 (2026-08-11): sheath-like heat-loss
+  # inner BC, alternative to both T_e_left_bc (Dirichlet) and
+  # use_zero_heat_flux_inner (pure Neumann). Default False is an exact
+  # no-op. Takes priority over use_zero_heat_flux_inner when both are set
+  # (mutually exclusive in practice; see getters.py).
+  use_sheath_heat_inner: bool = dataclasses.field(metadata={'static': True})
   initial_j_is_total_current: bool = dataclasses.field(
       metadata={'static': True}
   )
@@ -214,6 +263,42 @@ class ProfileConditions(torax_pydantic.BaseModelFrozen):
   use_robin_bc: Annotated[bool, torax_pydantic.JAX_STATIC] = False
   use_neumann_outer: Annotated[bool, torax_pydantic.JAX_STATIC] = False
   n_e_robin_bc_c_s: torax_pydantic.PositiveTimeVaryingScalar | None = None
+  # Stage 0 (2026-08-07): when True, the Robin BC's sheath-branch c_s is
+  # computed from core_profiles.T_e at the inner face instead of reading
+  # n_e_robin_bc_c_s -- see getters.py. Default False is an exact no-op:
+  # n_e_robin_bc_c_s keeps its existing role (including the near-zero
+  # "zeroflux" convention) for every script that doesn't set this.
+  use_local_robin_c_s: Annotated[bool, torax_pydantic.JAX_STATIC] = False
+  # Track B Step 2 (2026-08-11): zero-gradient (zero heat-flux) inner BC for
+  # T_e -- see getters.py's get_updated_electron_temperature. Default False
+  # is an exact no-op (T_e_left_bc's existing Dirichlet role unchanged).
+  use_zero_heat_flux_inner: Annotated[bool, torax_pydantic.JAX_STATIC] = False
+  # Track B Step 2 amendment, Task 3 (2026-08-11): sheath-like heat-loss
+  # inner BC, q=gamma_sheath*n*c_s*T_e -- the thermal counterpart of the
+  # inner Robin/grazing-recycling machinery above, testing the group's
+  # "heat flux out via grazing incidence" directive. False (default) is an
+  # exact no-op; gamma_sheath=0 with the flag True is ALSO an exact no-op
+  # (reproduces use_zero_heat_flux_inner's pure-Neumann result), matching
+  # the outer sheath BC's own tiny-value-reproduces-Neumann regression
+  # pattern (Task 13).
+  use_sheath_heat_inner: Annotated[bool, torax_pydantic.JAX_STATIC] = False
+  gamma_sheath: torax_pydantic.PositiveTimeVaryingScalar | None = None
+  # Check 2 (2026-08-11): floor on the sheath-heat BC's face value, in keV.
+  # 0.0 default is an exact no-op.
+  T_e_floor_keV: torax_pydantic.NonNegativeTimeVaryingScalar = (
+      torax_pydantic.ValidatedDefault(0.0)
+  )
+  # Outer sheath BC (2026-08-06): Gamma_out = n(1)*c_s(T_e) at the LCFS,
+  # mirroring use_robin_bc/n_e_robin_bc_c_s above. use_sheath_outer=False
+  # (default) is an exact no-op -- see getters.py's outer-BC block.
+  use_sheath_outer: Annotated[bool, torax_pydantic.JAX_STATIC] = False
+  n_e_sheath_outer_c_s: torax_pydantic.PositiveTimeVaryingScalar | None = None
+  # Inner grazing-recycling BC (2026-08-06): use_graze_recycling=True flips
+  # the sign of the inner Robin coefficient (see getters.py) from outflux to
+  # influx, using n_e_graze_recycling_c_s as the (always-positive) magnitude.
+  # False (default) is an exact no-op.
+  use_graze_recycling: Annotated[bool, torax_pydantic.JAX_STATIC] = False
+  n_e_graze_recycling_c_s: torax_pydantic.PositiveTimeVaryingScalar | None = None
   n_n_left_bc: torax_pydantic.PositiveTimeVaryingScalar = (
       torax_pydantic.ValidatedDefault(1e12)
   )
@@ -226,6 +311,12 @@ class ProfileConditions(torax_pydantic.BaseModelFrozen):
   R_iz: torax_pydantic.PositiveTimeVaryingScalar = (
       torax_pydantic.ValidatedDefault(3.17e-14)
   )
+  # Stage 0 (2026-08-07): when True, R_iz is computed per-cell from
+  # core_profiles.T_e via the Voronov (1997) fit instead of broadcasting this
+  # config scalar -- see calc_coeffs.py. Default False is an exact no-op
+  # (every existing script keeps the constant R_iz regardless of its T_e
+  # placeholder value).
+  use_local_R_iz: Annotated[bool, torax_pydantic.JAX_STATIC] = False
   R_RECYCLE: torax_pydantic.PositiveTimeVaryingScalar = (
       torax_pydantic.ValidatedDefault(0.99)
   )
@@ -460,7 +551,8 @@ class ProfileConditions(torax_pydantic.BaseModelFrozen):
         for x in dataclasses.fields(RuntimeParams)
         if x.name not in [
             'n_e_left_bc_is_absolute', 'n_e_right_bc_is_absolute',
-            'n_e_robin_bc_c_s',
+            'n_e_robin_bc_c_s', 'n_e_sheath_outer_c_s',
+            'n_e_graze_recycling_c_s', 'gamma_sheath',
         ]
     }
 
@@ -513,6 +605,24 @@ class ProfileConditions(torax_pydantic.BaseModelFrozen):
     runtime_params['n_e_robin_bc_c_s'] = (
         self.n_e_robin_bc_c_s.get_value(t)
         if self.n_e_robin_bc_c_s is not None
+        else jnp.zeros(())
+    )
+
+    runtime_params['n_e_sheath_outer_c_s'] = (
+        self.n_e_sheath_outer_c_s.get_value(t)
+        if self.n_e_sheath_outer_c_s is not None
+        else jnp.zeros(())
+    )
+
+    runtime_params['n_e_graze_recycling_c_s'] = (
+        self.n_e_graze_recycling_c_s.get_value(t)
+        if self.n_e_graze_recycling_c_s is not None
+        else jnp.zeros(())
+    )
+
+    runtime_params['gamma_sheath'] = (
+        self.gamma_sheath.get_value(t)
+        if self.gamma_sheath is not None
         else jnp.zeros(())
     )
 

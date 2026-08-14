@@ -66,7 +66,7 @@ def initial_core_profiles(
       runtime_params.profile_conditions, geo
   )
   n_e = getters.get_updated_electron_density(
-      runtime_params.profile_conditions, geo
+      runtime_params.profile_conditions, geo, T_e=T_e
   )
   ions = getters.get_updated_ions(runtime_params, geo, n_e, T_e)
   toroidal_angular_velocity = getters.get_updated_toroidal_angular_velocity(
@@ -108,7 +108,7 @@ def initial_core_profiles(
   # structure between the initial and post-step state) -- found via the Run
   # C_RS regression check, 2026-07-09.
   n_n = getters.get_updated_neutral_density(
-      runtime_params.profile_conditions, geo, n_e=n_e
+      runtime_params.profile_conditions, geo, n_e=n_e, T_e=T_e
   )
 
   core_profiles = state.CoreProfiles(
