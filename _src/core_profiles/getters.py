@@ -510,15 +510,39 @@ def get_updated_electron_density(
         ),
     )
 
-    A_r = 2.0 * D_eff_r / (drN * drN)
     _jac_sheath_outer = 1.0 / (1.0 - profile_conditions_params.rho_min)
-    B_sheath_outer = (
-        profile_conditions_params.n_e_sheath_outer_c_s / drN * _jac_sheath_outer
-    )
-    numerator_r   = A_r + V_full_r * (1.0 - 2.0 * alpha_r) / drN
-    denominator_r = A_r + 2.0 * V_full_r * (1.0 - alpha_r) / drN + B_sheath_outer
-    n_face_outer = value[-1] * numerator_r / jnp.maximum(denominator_r, jnp.ones(()) * 1e-30)
-    n_face_outer = jnp.clip(n_face_outer, jnp.zeros(()), value[-1])
+
+    if profile_conditions_params.use_sheath_outer_flux_form:
+      # 2026-09-10 (Jerome directive): grid-independent flux condition,
+      # derived directly from the continuum Robin BC Gamma_phys(L)=n(L)*c_s
+      # (not from an equivalent-Dirichlet-value weighting between A_r and
+      # B_sheath_outer, whose balance point drifts with drN -- see the
+      # RuntimeParams docstring). Derivation: with D_phys=D_eff_r/J^2 and
+      # V_phys=V_full_r/J (undoing the Stage-B0 mesh-Jacobian pre-scaling),
+      # a first-order Taylor extrapolation from the last cell centre to the
+      # face, n_face = n[-1] + (dn/drho_hat)|_L * (drN/(2J)), combined with
+      # the Robin condition (dn/drho_hat)|_L = -n_face*(c_s_outer-V_phys)/
+      # D_phys, gives n_face EXACTLY satisfying Gamma_phys(L)=n_face*c_s_outer
+      # for ANY drN by construction (verified: the algebra solves for n_face
+      # such that this holds identically, not just in a limit) -- only the
+      # accuracy of n_face as an approximation to the true continuum n(L)
+      # depends on drN (standard first-order truncation error), not the
+      # boundary condition itself.
+      denom_flux = 2.0 * D_eff_r + (
+          profile_conditions_params.n_e_sheath_outer_c_s * _jac_sheath_outer
+          - V_full_r
+      ) * drN
+      n_face_outer = value[-1] * 2.0 * D_eff_r / jnp.maximum(denom_flux, jnp.ones(()) * 1e-30)
+      n_face_outer = jnp.clip(n_face_outer, jnp.zeros(()), value[-1])
+    else:
+      A_r = 2.0 * D_eff_r / (drN * drN)
+      B_sheath_outer = (
+          profile_conditions_params.n_e_sheath_outer_c_s / drN * _jac_sheath_outer
+      )
+      numerator_r   = A_r + V_full_r * (1.0 - 2.0 * alpha_r) / drN
+      denominator_r = A_r + 2.0 * V_full_r * (1.0 - alpha_r) / drN + B_sheath_outer
+      n_face_outer = value[-1] * numerator_r / jnp.maximum(denominator_r, jnp.ones(()) * 1e-30)
+      n_face_outer = jnp.clip(n_face_outer, jnp.zeros(()), value[-1])
     right_face_bc = n_face_outer
   else:
     right_face_bc = n_e_right_bc

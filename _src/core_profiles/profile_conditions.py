@@ -122,6 +122,18 @@ class RuntimeParams:
   use_robin_bc: bool = dataclasses.field(metadata={'static': True})
   use_neumann_outer: bool = dataclasses.field(metadata={'static': True})
   use_sheath_outer: bool = dataclasses.field(metadata={'static': True})
+  # 2026-09-10 (Jerome directive): the existing use_sheath_outer formula's
+  # B_sheath_outer=c_s/drN*J term makes the effective boundary condition
+  # progressively weaker relative to the diffusive term A_r=2*D_eff/drN^2 as
+  # the grid is refined (A_r/B_sheath_outer ~ 1/drN -> infinity), so the
+  # enforced flux is grid-dependent, not a fixed physical condition. This flag
+  # selects a grid-independent alternative, derived from the continuum Robin
+  # condition Gamma(L)=n(L)*c_s directly (see getters.py) rather than from an
+  # equivalent-Dirichlet-value weighting whose balance point shifts with the
+  # mesh. False (default) is an EXACT no-op, preserving the original
+  # use_sheath_outer formula bit-for-bit -- see the getters.py regression
+  # gate. Only meaningful when use_sheath_outer=True.
+  use_sheath_outer_flux_form: bool = dataclasses.field(metadata={'static': True})
   use_graze_recycling: bool = dataclasses.field(metadata={'static': True})
   # Stage 0 (2026-08-07, energy-equation-scoping Task 2): both default False,
   # an exact no-op preserving every existing script's behaviour regardless of
@@ -299,6 +311,10 @@ class ProfileConditions(torax_pydantic.BaseModelFrozen):
   # mirroring use_robin_bc/n_e_robin_bc_c_s above. use_sheath_outer=False
   # (default) is an exact no-op -- see getters.py's outer-BC block.
   use_sheath_outer: Annotated[bool, torax_pydantic.JAX_STATIC] = False
+  # 2026-09-10 (Jerome directive): grid-independent alternative to the above
+  # formula's implicit grid-dependence. False (default) = exact no-op, see
+  # RuntimeParams docstring above and getters.py for the full derivation.
+  use_sheath_outer_flux_form: Annotated[bool, torax_pydantic.JAX_STATIC] = False
   n_e_sheath_outer_c_s: torax_pydantic.PositiveTimeVaryingScalar | None = None
   # Inner grazing-recycling BC (2026-08-06): use_graze_recycling=True flips
   # the sign of the inner Robin coefficient (see getters.py) from outflux to
