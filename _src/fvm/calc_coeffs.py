@@ -514,9 +514,19 @@ def _calc_coeffs_full(
   )
   _fs_S0 = runtime_params.profile_conditions.fixed_source_S0
   _fs_nref = runtime_params.profile_conditions.fixed_source_n_ref
+  # Stage 1 (2026-08-19): self-consistent optical depth uses the CURRENT
+  # n_e state instead of the fixed n_ref -- tau(rho_hat) = int n_e(s)*R_iz*
+  # h_rho(s)/v_th_n ds becomes a functional of the solution itself. Default
+  # (use_self_consistent_source=False) keeps the fixed_source_n_ref density,
+  # an exact no-op for every prior script.
+  _kappa_density = jnp.where(
+      runtime_params.profile_conditions.use_self_consistent_source,
+      core_profiles.n_e.value,
+      _fs_nref,
+  )
   _B_cell = jnp.sqrt(jnp.maximum(geo.gm5, 1e-10))
   _h_rho_cell = 2.0 * psi_b * rho_hat_cell / jnp.maximum(_B_cell, 1e-10)
-  _kappa_cell = _fs_nref * _R_iz_cell * _h_rho_cell / (
+  _kappa_cell = _kappa_density * _R_iz_cell * _h_rho_cell / (
       runtime_params.profile_conditions.v_th_n
   )
   # cumulative optical depth from the inner wall (physical rho_hat spacing),

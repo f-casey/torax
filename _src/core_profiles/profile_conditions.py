@@ -111,6 +111,13 @@ class RuntimeParams:
   # v_th_n. Inert when S0=0 (default) -- source scales as S0 so no branch needed.
   fixed_source_S0: array_typing.FloatScalar
   fixed_source_n_ref: array_typing.FloatScalar
+  # Stage 1 (2026-08-19, goal-5-realistic-neutrals-and-thermal): when True,
+  # the optical-depth density in the Stage B source above is core_profiles.
+  # n_e.value (the CURRENT, evolving state) instead of the fixed constant
+  # fixed_source_n_ref -- makes S a functional of n, not a fixed profile.
+  # Default False is an exact no-op (fixed_source_n_ref keeps its existing
+  # role for every prior script). See calc_coeffs.py.
+  use_self_consistent_source: bool = dataclasses.field(metadata={'static': True})
   current_profile_nu: float
   use_robin_bc: bool = dataclasses.field(metadata={'static': True})
   use_neumann_outer: bool = dataclasses.field(metadata={'static': True})
@@ -337,6 +344,11 @@ class ProfileConditions(torax_pydantic.BaseModelFrozen):
   fixed_source_n_ref: torax_pydantic.NonNegativeTimeVaryingScalar = (
       torax_pydantic.ValidatedDefault(0.0)
   )
+  # Stage 1 (2026-08-19): use core_profiles.n_e.value instead of
+  # fixed_source_n_ref for the Stage B source's optical-depth density.
+  # Default False is an exact no-op (every prior script keeps the fixed
+  # n_ref).
+  use_self_consistent_source: Annotated[bool, torax_pydantic.JAX_STATIC] = False
   current_profile_nu: float = 1.0
   initial_j_is_total_current: Annotated[bool, torax_pydantic.JAX_STATIC] = False
   # TODO(b/434175938): Remove this before the V2 API release in place of
