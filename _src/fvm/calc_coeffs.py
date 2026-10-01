@@ -416,7 +416,23 @@ def _calc_coeffs_full(
   rho_hat_cell = rho_min + (1.0 - rho_min) * geo.rho_norm
   psi_b = geo.psi[-1]
   B_face_n_n = jnp.sqrt(jnp.maximum(geo.gm5_face, 1e-10))
-  h_rho_face = 2.0 * psi_b * rho_hat_face / jnp.maximum(B_face_n_n, 1e-10)
+  # h_rho (2026-10-01). The Eq. 178 form below is DIMENSIONALLY WRONG: Eq. 178
+  # misquotes Eq. 109 as |grad psi| ~ B where Eq. 109 is |grad psi| = R B, and
+  # Eq. 113 gives h_rho = (1/(R B)) dpsi/drho in METRES -- the dropped R is a
+  # missing power of length (2 psi_b rho_hat/B has units Wb/T = m^2). It also
+  # assumes psi = psi_b rho_hat^2 (Eq. 106), which is false where psi falls
+  # outward, and it vanishes at rho_hat = 0 (the July h_rho_face singularity).
+  # use_metric_h_rho=True selects the geometric metric instead,
+  # h_rho = sqrt(vpr/(g1/vpr)) = 1/sqrt(<|grad rho_hat|^2>), which is in metres
+  # and, in SLAB, equals dx/drho_hat EXACTLY. Default False is an exact no-op.
+  _h_rho_metric_face = jnp.sqrt(
+      jnp.maximum(geo.vpr_face / jnp.maximum(geo.g1_over_vpr_face, 1e-300), 0.0)
+  )
+  h_rho_face = jnp.where(
+      runtime_params.profile_conditions.use_metric_h_rho,
+      _h_rho_metric_face,
+      2.0 * psi_b * rho_hat_face / jnp.maximum(B_face_n_n, 1e-10),
+  )
 
   d_face_n_n = jnp.zeros_like(geo.rho_face)
   # Geometric factor fix (2026-07-14): use geo.vpr_face (V_rho = dV/drho_hat),
@@ -525,7 +541,16 @@ def _calc_coeffs_full(
       _fs_nref,
   )
   _B_cell = jnp.sqrt(jnp.maximum(geo.gm5, 1e-10))
-  _h_rho_cell = 2.0 * psi_b * rho_hat_cell / jnp.maximum(_B_cell, 1e-10)
+  # Same h_rho correction as the n_n advection above, applied to the fixed
+  # source's optical depth so the two cannot disagree. Default False is a no-op.
+  _h_rho_metric_cell = jnp.sqrt(
+      jnp.maximum(geo.vpr / jnp.maximum(geo.g1_over_vpr, 1e-300), 0.0)
+  )
+  _h_rho_cell = jnp.where(
+      runtime_params.profile_conditions.use_metric_h_rho,
+      _h_rho_metric_cell,
+      2.0 * psi_b * rho_hat_cell / jnp.maximum(_B_cell, 1e-10),
+  )
   _kappa_cell = _kappa_density * _R_iz_cell * _h_rho_cell / (
       runtime_params.profile_conditions.v_th_n
   )

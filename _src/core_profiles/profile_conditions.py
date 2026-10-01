@@ -118,6 +118,16 @@ class RuntimeParams:
   # Default False is an exact no-op (fixed_source_n_ref keeps its existing
   # role for every prior script). See calc_coeffs.py.
   use_self_consistent_source: bool = dataclasses.field(metadata={'static': True})
+  # h_rho metric mode (2026-10-01). False (default) keeps the Eq. 178 form
+  # h_rho = 2*psi_b*rho_hat/sqrt(<B^2>), an EXACT no-op for every prior script.
+  # True uses the geometric metric h_rho = sqrt(vpr/(g1/vpr)) = 1/sqrt(<|grad
+  # rho_hat|^2>), which has units of METRES as Eq. 113 requires. See
+  # concepts/h-rho-definition in the project vault: Eq. 178 misquotes Eq. 109 as
+  # |grad psi| ~ B, dropping R, which is the missing power of length; and
+  # 2*psi_b*rho_hat assumes psi = psi_b*rho_hat^2 (Eq. 106), false where psi
+  # falls outward. In SLAB this reduces to dx/drho_hat EXACTLY, which is why it
+  # is what the slab neutral unit tests need.
+  use_metric_h_rho: bool = dataclasses.field(metadata={'static': True})
   current_profile_nu: float
   use_robin_bc: bool = dataclasses.field(metadata={'static': True})
   use_neumann_outer: bool = dataclasses.field(metadata={'static': True})
@@ -365,6 +375,9 @@ class ProfileConditions(torax_pydantic.BaseModelFrozen):
   # Default False is an exact no-op (every prior script keeps the fixed
   # n_ref).
   use_self_consistent_source: Annotated[bool, torax_pydantic.JAX_STATIC] = False
+  # h_rho metric mode -- see the dataclass field above. Default False is an
+  # exact no-op (every prior script keeps the Eq. 178 form).
+  use_metric_h_rho: Annotated[bool, torax_pydantic.JAX_STATIC] = False
   current_profile_nu: float = 1.0
   initial_j_is_total_current: Annotated[bool, torax_pydantic.JAX_STATIC] = False
   # TODO(b/434175938): Remove this before the V2 API release in place of
