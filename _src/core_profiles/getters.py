@@ -613,7 +613,23 @@ def get_updated_neutral_density(
     m_i_hydrogen = 1.67e-27
     T_e_local_eV = (T_e.value[0] * 1e3) if T_e is not None else 100.0
     c_s = jnp.sqrt(1.602e-19 * T_e_local_eV / m_i_hydrogen)
-    n_e_inner = n_e.value[0]
+    # WHICH DENSITY SETS THE RECYCLING INFLOW (2026-10-02).
+    # The default uses n_e.value[0], the first CELL-CENTRE value. That makes the
+    # neutral inflow MESH-DEPENDENT: the first cell centre sits further from the
+    # wall on a coarser mesh, and where n_e rises steeply off the wall the inflow
+    # is inflated by exactly n_e[0]/n_e(wall). Measured in the Day 3 coupled
+    # runs: n_e[0]/n_0 = 1.005 / 1.011 / 1.052 at Pe = 10 / 100 / 1000 on fitted
+    # meshes, and 2.105 at Pe = 1000 on a coarse one -- and dividing it out
+    # recovered the analytic reference to 0.01-0.04%, i.e. it accounted for the
+    # WHOLE discrepancy.
+    # use_metric_h_rho=True selects the wall FACE density instead, which is the
+    # C1 condition inflow = n_0 c_s and is mesh-independent. Default False keeps
+    # n_e.value[0] exactly, so every prior script is unchanged.
+    n_e_inner = jnp.where(
+        profile_conditions_params.use_metric_h_rho,
+        profile_conditions_params.n_e_left_bc,
+        n_e.value[0],
+    )
     left_face_bc = (
         profile_conditions_params.R_RECYCLE
         * n_e_inner
