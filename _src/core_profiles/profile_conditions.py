@@ -128,6 +128,17 @@ class RuntimeParams:
   # falls outward. In SLAB this reduces to dx/drho_hat EXACTLY, which is why it
   # is what the slab neutral unit tests need.
   use_metric_h_rho: bool = dataclasses.field(metadata={'static': True})
+  # FLUX-DRIVEN NEUTRAL INFLOW (2026-10-08, Jerome's recycling-consistent
+  # wall). The default inflow is built from a density (n_e[0] or the wall
+  # face value) times c_s, i.e. it ASSUMES the ion flux into the coil is the
+  # Bohm flux n c_s. With a pinch that is false: the ion flux is set by the
+  # transport solution, not by the sheath. use_flux_driven_n_n_bc=True takes
+  # n_n_left_bc verbatim as the inflow face value, so the caller can supply
+  # R*max(Gamma_w,0)/v_th_n from the solver's OWN face flux. R is then applied
+  # by the caller, NOT by R_RECYCLE here. Default False is an exact no-op.
+  use_flux_driven_n_n_bc: bool = dataclasses.field(
+      metadata={'static': True}
+  )
   current_profile_nu: float
   use_robin_bc: bool = dataclasses.field(metadata={'static': True})
   use_neumann_outer: bool = dataclasses.field(metadata={'static': True})
@@ -378,6 +389,9 @@ class ProfileConditions(torax_pydantic.BaseModelFrozen):
   # h_rho metric mode -- see the dataclass field above. Default False is an
   # exact no-op (every prior script keeps the Eq. 178 form).
   use_metric_h_rho: Annotated[bool, torax_pydantic.JAX_STATIC] = False
+  # Flux-driven neutral inflow -- see the dataclass field above. Default
+  # False is an exact no-op (every prior script keeps the density form).
+  use_flux_driven_n_n_bc: Annotated[bool, torax_pydantic.JAX_STATIC] = False
   current_profile_nu: float = 1.0
   initial_j_is_total_current: Annotated[bool, torax_pydantic.JAX_STATIC] = False
   # TODO(b/434175938): Remove this before the V2 API release in place of

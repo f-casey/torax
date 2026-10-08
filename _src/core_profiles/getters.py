@@ -630,11 +630,25 @@ def get_updated_neutral_density(
         profile_conditions_params.n_e_left_bc,
         n_e.value[0],
     )
-    left_face_bc = (
+    _density_driven_bc = (
         profile_conditions_params.R_RECYCLE
         * n_e_inner
         * c_s
         / profile_conditions_params.v_th_n
+    )
+    # FLUX-DRIVEN INFLOW (2026-10-08). Both branches above build the inflow from
+    # a DENSITY times c_s, which presumes the ion flux into the coil is the Bohm
+    # flux. With a pinch the ion flux is whatever the transport solution gives,
+    # and Jerome's recycling-consistent wall asks for inflow = R * Gamma_w with
+    # that computed flux. use_flux_driven_n_n_bc=True hands n_n_left_bc straight
+    # through so the caller can supply R*max(Gamma_w,0)/v_th_n itself; R is then
+    # the caller's, not R_RECYCLE's. jnp.where (not a Python if) because
+    # n_n_left_bc is traced; the flag itself is static, so XLA prunes the dead
+    # branch and the flag-off path is bit-identical.
+    left_face_bc = jnp.where(
+        profile_conditions_params.use_flux_driven_n_n_bc,
+        profile_conditions_params.n_n_left_bc,
+        _density_driven_bc,
     )
   else:
     left_face_bc = profile_conditions_params.n_n_left_bc
