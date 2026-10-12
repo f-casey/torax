@@ -323,6 +323,46 @@ class StandardGeometryIntermediates:
     # self.vpr[:] = _smooth_savgol(self.vpr, idx_limit, 1)
 
 
+# ---------------------------------------------------------------------------
+# POSITIVE-g0 OPTION (2026-10-12, dipole step 0 -- "Option A").
+#
+# g0 is built below as <|grad psi|> * dV/dpsi and so carries exactly ONE power
+# of dV/dpsi. In a DIPOLE psi falls outward, so dV/dpsi < 0 and g0 comes out
+# NEGATIVE, while standard TORAX defines g0 = vpr<|grad rho_hat|>, which is
+# positive by construction. g1 and g2 carry dV/dpsi SQUARED and are unaffected.
+#
+# The consequence is in the particle pinch, which calc_coeffs.py assembles as
+# full_v_face_el = geo.g0_face * v_face_el_total: a BARE prescribed inward V_e
+# then convects OUTWARD.
+#
+# WHY THIS IS SAFE. Every existing dipole consumer PRE-DIVIDES by the same raw
+# signed g0 that the solver re-multiplies (ql_dipole_model.py:186-188 and :317,
+# and the project's task21/task27 harnesses), so flipping the sign in BOTH
+# places leaves the assembled coefficient bit-identical. The audit of 2026-10-08
+# measured that cancellation at 9.8e-17. Taking |g0| in the SOLVER instead would
+# break the cancellation and invert every QL result -- which is why the fix
+# belongs here, at construction, and not at the point of use.
+#
+# Module-level and default False, i.e. an exact no-op, because
+# build_standard_geometry takes only `intermediates` and there is no config
+# object to thread a field through. Callers opt in explicitly:
+#     from torax._src.geometry import standard_geometry
+#     standard_geometry.set_positive_g0(True)
+# before building the geometry.
+_POSITIVE_G0 = False
+
+
+def set_positive_g0(value: bool) -> bool:
+  """Opt in to g0 = |<grad V>| at construction. Default False is a no-op."""
+  global _POSITIVE_G0
+  _POSITIVE_G0 = bool(value)
+  return _POSITIVE_G0
+
+
+def get_positive_g0() -> bool:
+  return _POSITIVE_G0
+
+
 def build_standard_geometry(
     intermediates: StandardGeometryIntermediates,
 ) -> StandardGeometry:
@@ -346,6 +386,10 @@ def build_standard_geometry(
   # derived geometric quantities
   dV_dpsi = intermediates.int_dl_over_Bp
   g0 = intermediates.flux_surf_avg_grad_psi * dV_dpsi  # <\nabla V>
+  if _POSITIVE_G0:
+    # See the note above build_standard_geometry. Applied HERE so that
+    # g0, g0_face and the derived g0_over_vpr all inherit it together.
+    g0 = np.abs(g0)
   g1 = intermediates.flux_surf_avg_grad_psi2 * dV_dpsi**2  # <(\nabla V)^2>
   g2 = (
       intermediates.flux_surf_avg_grad_psi2_over_R2 * dV_dpsi**2
