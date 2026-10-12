@@ -139,6 +139,18 @@ class RuntimeParams:
   use_flux_driven_n_n_bc: bool = dataclasses.field(
       metadata={'static': True}
   )
+  # h_rho CANDIDATE (c), the ADVECTIVE average (2026-10-12, dipole step 1).
+  # use_metric_h_rho selects candidate (b), h_rho = sqrt(vpr/g1ovp)
+  # = 1/sqrt(<|grad rho|^2>), which is the right average for DIFFUSION. Neutral
+  # advection needs the first moment, not the second:
+  # <n_n v_n . grad rho> ~ n_n v_n <|grad rho|>, and g0 = vpr<|grad rho|>, so the
+  # advective average is h_rho = vpr/|g0| = 1/<|grad rho|>. Adopted by Jerome on
+  # 2026-10-08. Requires use_metric_h_rho=True as well; |g0| because g0 is stored
+  # NEGATIVE unless standard_geometry.set_positive_g0(True) is in force.
+  # Default False is an exact no-op.
+  use_h_rho_advective: bool = dataclasses.field(
+      metadata={'static': True}
+  )
   current_profile_nu: float
   use_robin_bc: bool = dataclasses.field(metadata={'static': True})
   use_neumann_outer: bool = dataclasses.field(metadata={'static': True})
@@ -392,6 +404,9 @@ class ProfileConditions(torax_pydantic.BaseModelFrozen):
   # Flux-driven neutral inflow -- see the dataclass field above. Default
   # False is an exact no-op (every prior script keeps the density form).
   use_flux_driven_n_n_bc: Annotated[bool, torax_pydantic.JAX_STATIC] = False
+  # h_rho candidate (c) -- see the dataclass field above. Default False is an
+  # exact no-op (callers keep candidate (b)).
+  use_h_rho_advective: Annotated[bool, torax_pydantic.JAX_STATIC] = False
   current_profile_nu: float = 1.0
   initial_j_is_total_current: Annotated[bool, torax_pydantic.JAX_STATIC] = False
   # TODO(b/434175938): Remove this before the V2 API release in place of

@@ -433,6 +433,19 @@ def _calc_coeffs_full(
       _h_rho_metric_face,
       2.0 * psi_b * rho_hat_face / jnp.maximum(B_face_n_n, 1e-10),
   )
+  # CANDIDATE (c), the ADVECTIVE average (2026-10-12). _h_rho_metric_face above
+  # is candidate (b), 1/sqrt(<|grad rho|^2>) -- the second moment, which is what
+  # DIFFUSION needs. Neutral advection needs the first moment: g0 = vpr<|grad
+  # rho|>, so h_rho = vpr/|g0| = 1/<|grad rho|>. Adopted by Jerome 2026-10-08.
+  # abs() because g0 is stored NEGATIVE in this dipole equilibrium unless
+  # standard_geometry.set_positive_g0(True) is in force; with it on the abs() is
+  # redundant and harmless. Default False is an exact no-op.
+  _h_rho_adv_face = geo.vpr_face / jnp.maximum(jnp.abs(geo.g0_face), 1e-300)
+  h_rho_face = jnp.where(
+      runtime_params.profile_conditions.use_h_rho_advective,
+      _h_rho_adv_face,
+      h_rho_face,
+  )
 
   d_face_n_n = jnp.zeros_like(geo.rho_face)
   # Geometric factor fix (2026-07-14): use geo.vpr_face (V_rho = dV/drho_hat),
