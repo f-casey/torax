@@ -37,6 +37,7 @@ from torax._src.fvm import calc_coeffs
 from torax._src.fvm import cell_variable
 from torax._src.fvm import discrete_system
 from torax._src.fvm import fvm_conversions
+from torax._src.fvm import implicit_recycling
 from torax._src.geometry import geometry
 from torax._src.sources import source_profiles
 
@@ -257,6 +258,25 @@ def theta_method_block_residual(
   )
 
   solver_params = runtime_params_t_plus_dt.solver
+
+  # IMPLICIT RECYCLING BC (2026-10-16, flagged). Re-solve the neutral inner
+  # Dirichlet constraint from the TRIAL state, so recycling is exact at the
+  # discrete level at every Newton iteration instead of being frozen at the old
+  # time level. The flag is static, so with it off XLA prunes this branch and
+  # the path is bit-identical. See _src/fvm/implicit_recycling.py.
+  if runtime_params_t_plus_dt.profile_conditions.implicit_recycling_bc:
+    x_new_guess, _ = implicit_recycling.solve_neutral_bc(
+        x=x_new_guess,
+        coeffs=coeffs_new,
+        evolving_names=evolving_names,
+        recycling_coefficient=(
+            runtime_params_t_plus_dt.profile_conditions.R_RECYCLE
+        ),
+        dirichlet_mode=solver_params.convection_dirichlet_mode,
+        neumann_mode=solver_params.convection_neumann_mode,
+        drho=geo_t_plus_dt.drho_norm,
+    )
+
   lhs_mat, lhs_vec, rhs_mat, rhs_vec = theta_method_matrix_equation(
       dt=dt,
       x_old=x_old,

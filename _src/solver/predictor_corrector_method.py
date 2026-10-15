@@ -26,6 +26,7 @@ from torax._src.config import runtime_params as runtime_params_lib
 from torax._src.fvm import block_1d_coeffs
 from torax._src.fvm import calc_coeffs
 from torax._src.fvm import cell_variable
+from torax._src.fvm import implicit_recycling
 from torax._src.fvm import implicit_solve_block
 from torax._src.geometry import geometry
 from torax._src.solver import jax_fixed_point
@@ -86,6 +87,25 @@ def predictor_corrector_method(
         explicit_source_profiles=explicit_source_profiles,
         allow_pereverzev=True,
     )
+
+    # IMPLICIT RECYCLING BC (2026-10-16, flagged). Refreshed on every corrector
+    # pass from that pass's trial state, so the Picard loop converges to the
+    # state in which Gamma_n(coil) = R*Gamma_w,ion(coil) exactly. Static flag,
+    # so flag-off is bit-identical. See _src/fvm/implicit_recycling.py.
+    if runtime_params_t_plus_dt.profile_conditions.implicit_recycling_bc:
+      x_new_guess, _ = implicit_recycling.solve_neutral_bc(
+          x=x_new_guess,
+          coeffs=coeffs_new,
+          evolving_names=tuple(
+              runtime_params_t_plus_dt.numerics.evolving_names
+          ),
+          recycling_coefficient=(
+              runtime_params_t_plus_dt.profile_conditions.R_RECYCLE
+          ),
+          dirichlet_mode=solver_params.convection_dirichlet_mode,
+          neumann_mode=solver_params.convection_neumann_mode,
+          drho=geo_t_plus_dt.drho_norm,
+      )
 
     return implicit_solve_block.implicit_solve_block(
         dt=dt,

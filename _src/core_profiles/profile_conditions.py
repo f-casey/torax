@@ -151,6 +151,18 @@ class RuntimeParams:
   use_h_rho_advective: bool = dataclasses.field(
       metadata={'static': True}
   )
+  # IMPLICIT RECYCLING BC (2026-10-16). Boundary conditions are built once per
+  # step from the OLD time level and frozen for the whole nonlinear solve, so a
+  # recycling wall's neutral inflow lags the ion flux it is supposed to equal by
+  # one step. With this flag the neutral inner Dirichlet constraint is re-solved
+  # from the TRIAL state on every residual evaluation, so that
+  # Gamma_n(coil) = R_RECYCLE * Gamma_w,ion(coil) holds at the DISCRETE level.
+  # See _src/fvm/implicit_recycling.py. Requires evolve_n_n and evolve_density;
+  # R is R_RECYCLE here, NOT the caller's (contrast use_flux_driven_n_n_bc,
+  # which hands n_n_left_bc through verbatim). Default False is an exact no-op.
+  implicit_recycling_bc: bool = dataclasses.field(
+      metadata={'static': True}
+  )
   current_profile_nu: float
   use_robin_bc: bool = dataclasses.field(metadata={'static': True})
   use_neumann_outer: bool = dataclasses.field(metadata={'static': True})
@@ -407,6 +419,9 @@ class ProfileConditions(torax_pydantic.BaseModelFrozen):
   # h_rho candidate (c) -- see the dataclass field above. Default False is an
   # exact no-op (callers keep candidate (b)).
   use_h_rho_advective: Annotated[bool, torax_pydantic.JAX_STATIC] = False
+  # Implicit recycling BC -- see the dataclass field above. Default False is an
+  # exact no-op (the BC stays frozen at the old time level, as before).
+  implicit_recycling_bc: Annotated[bool, torax_pydantic.JAX_STATIC] = False
   current_profile_nu: float = 1.0
   initial_j_is_total_current: Annotated[bool, torax_pydantic.JAX_STATIC] = False
   # TODO(b/434175938): Remove this before the V2 API release in place of
